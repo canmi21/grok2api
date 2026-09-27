@@ -33,13 +33,45 @@ pub struct Request {
 	pub model: String,
 	/// Honored when the model offers it, ignored when not (spec/api.md).
 	pub effort: Option<String>,
+	/// A JSON Schema the answer must match (spec/api.md, "Structured output").
+	pub schema: Option<Value>,
 }
 
+/// What a turn produces, in the agent's terms; each API shape renders it its own way.
 pub enum Update {
 	Reasoning(String),
 	Content(String),
-	Done { finish_reason: &'static str, usage: Value },
+	Done(Outcome),
 	Failed(String),
+}
+
+pub struct Outcome {
+	/// ACP's stop reason: `end_turn`, `max_tokens`, `refusal`, `cancelled`, ...
+	pub stop_reason: String,
+	pub usage: Usage,
+}
+
+/// Token counts as the agent reports them. `input` is the whole prompt, cache reads included.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Usage {
+	pub input: u64,
+	pub output: u64,
+	pub cache_read: u64,
+	pub cache_creation: u64,
+	pub reasoning: u64,
+}
+
+impl Usage {
+	fn from_meta(meta: &Value) -> Self {
+		let count = |value: &Value| value.as_u64().unwrap_or(0);
+		Self {
+			input: count(&meta["inputTokens"]),
+			output: count(&meta["outputTokens"]),
+			cache_read: count(&meta["cachedReadTokens"]),
+			cache_creation: count(&meta["usage"]["cacheCreationTokens"]),
+			reasoning: count(&meta["reasoningTokens"]),
+		}
+	}
 }
 
 impl Bridge {
@@ -59,7 +91,7 @@ impl Bridge {
 	/// Prepares the session and starts the prompt. An error here is the request's, returned before
 	/// any byte of the response; a failure after it arrives as `Update::Failed`.
 	pub async fn start(self: &Arc<Self>, request: Request) -> Result<mpsc::Receiver<Update>> {
-		let Request { conversation, model, effort } = request;
+		let Request { conversation, model, effort, schema } = request;
 		let history = conversation.history_keys();
 		let (mut session, mut blocks, continued) = match self.pool.claim(&conversation.system, &history)
 		{
@@ -94,7 +126,9 @@ impl Bridge {
 
 		let (tx, rx) = mpsc::channel(64);
 		let bridge = self.clone();
-		tokio::spawn(async move { bridge.answer(session, conversation.last, blocks, tx).await });
+		tokio::spawn(
+			async move { bridge.answer(session, conversation.last, blocks, schema, tx).await },
+		);
 		Ok(rx)
 	}
 
@@ -126,11 +160,12 @@ impl Bridge {
 		mut session: Session,
 		last: Message,
 		blocks: Vec<Value>,
+		schema: Option<Value>,
 		tx: mpsc::Sender<Update>,
 	) {
 		let (agent, id) = (session.agent.clone(), session.id.clone());
 		let mut updates = agent.subscribe(&id);
-		let prompt = agent.prompt(&id, blocks);
+		let prompt = agent.prompt(&id, blocks, schema.as_ref());
 		tokio::pin!(prompt);
 		let mut content = String::new();
 		let mut client_gone = false;
@@ -157,12 +192,9 @@ impl Bridge {
 				session.history.push(last.key());
 				session.history.push(Message::assistant(content).key());
 				self.pool.release(session);
-				let _ = tx
-					.send(Update::Done {
-						finish_reason: finish_reason(result["stopReason"].as_str()),
-						usage: usage(&result["_meta"]),
-					})
-					.await;
+				let stop_reason = result["stopReason"].as_str().unwrap_or("end_turn").to_owned();
+				let usage = Usage::from_meta(&result["_meta"]);
+				let _ = tx.send(Update::Done(Outcome { stop_reason, usage })).await;
 			}
 			// A cancelled or failed turn leaves the session holding a conversation nobody has.
 			Ok(result) => {
@@ -214,26 +246,4 @@ async fn forward(update: &Value, content: &mut String, tx: &mpsc::Sender<Update>
 		_ => return true,
 	};
 	tx.send(message).await.is_ok()
-}
-
-fn finish_reason(stop_reason: Option<&str>) -> &'static str {
-	match stop_reason {
-		Some("max_tokens") => "length",
-		Some("refusal") => "content_filter",
-		_ => "stop",
-	}
-}
-
-/// ACP's `inputTokens` is the whole prompt, cache hits included, which is what OpenAI's
-/// `prompt_tokens` means too.
-fn usage(meta: &Value) -> Value {
-	let count = |name: &str| meta[name].as_u64().unwrap_or(0);
-	let (input, output) = (count("inputTokens"), count("outputTokens"));
-	json!({
-		"prompt_tokens": input,
-		"completion_tokens": output,
-		"total_tokens": input + output,
-		"prompt_tokens_details": { "cached_tokens": count("cachedReadTokens") },
-		"completion_tokens_details": { "reasoning_tokens": count("reasoningTokens") },
-	})
 }

@@ -38,8 +38,21 @@ type Subscribers = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>>;
 pub struct AgentInfo {
 	pub version: String,
 	pub signed_in: bool,
-	pub models: Vec<String>,
+	pub models: Vec<Model>,
 	pub default_model: String,
+}
+
+#[derive(Debug)]
+pub struct Model {
+	pub id: String,
+	/// What the CLI shows for it, `Grok 4.7` for `grok-4.7`.
+	pub name: String,
+}
+
+impl AgentInfo {
+	pub fn offers(&self, model: &str) -> bool {
+		self.models.iter().any(|offered| offered.id == model)
+	}
 }
 
 pub struct Agent {
@@ -185,8 +198,18 @@ impl Agent {
 	}
 
 	/// Sends one prompt and waits for its end; the streamed content arrives through `subscribe`.
-	pub async fn prompt(&self, session_id: &str, blocks: Vec<Value>) -> Result<Value> {
-		self.request("session/prompt", json!({ "sessionId": session_id, "prompt": blocks })).await
+	/// A schema constrains the answer to JSON matching it, the ACP side of the CLI's `--json-schema`.
+	pub async fn prompt(
+		&self,
+		session_id: &str,
+		blocks: Vec<Value>,
+		schema: Option<&Value>,
+	) -> Result<Value> {
+		let mut params = json!({ "sessionId": session_id, "prompt": blocks });
+		if let Some(schema) = schema {
+			params["_meta"] = json!({ "outputSchema": schema });
+		}
+		self.request("session/prompt", params).await
 	}
 
 	pub fn cancel(&self, session_id: &str) {
@@ -235,10 +258,17 @@ async fn initialize(
 	let result = call(writer, pending, INITIALIZE_ID, "initialize", params).await?;
 	let meta = &result["_meta"];
 	let state = &meta["modelState"];
-	let models: Vec<String> = state["availableModels"]
+	let models: Vec<Model> = state["availableModels"]
 		.as_array()
 		.map(|models| {
-			models.iter().filter_map(|model| model["modelId"].as_str().map(str::to_owned)).collect()
+			models
+				.iter()
+				.filter_map(|model| {
+					let id = model["modelId"].as_str()?.to_owned();
+					let name = model["name"].as_str().map(str::to_owned).unwrap_or_else(|| id.clone());
+					Some(Model { id, name })
+				})
+				.collect()
 		})
 		.unwrap_or_default();
 	Ok(AgentInfo {
@@ -247,7 +277,7 @@ async fn initialize(
 		default_model: state["currentModelId"]
 			.as_str()
 			.map(str::to_owned)
-			.or_else(|| models.first().cloned())
+			.or_else(|| models.first().map(|model| model.id.clone()))
 			.unwrap_or_default(),
 		models,
 	})

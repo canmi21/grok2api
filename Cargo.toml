@@ -24,6 +24,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+
+# End to end against a fake agent. The test binary is the fake agent too, so it brings its own
+# main rather than libtest's; see tests/api/main.rs.
+[[test]]
+name = "api"
+path = "tests/api/main.rs"
+harness = false
+
 # clippy carries no style lints; rustfmt owns layout. See the workspace's spec/lint-format.md.
 [lints.clippy]
 correctness = "deny"

@@ -1,10 +1,12 @@
 mod agent;
+mod anthropic;
 mod check;
 mod cli;
 mod config;
 mod environment;
 mod http;
 mod message;
+mod openai;
 mod sessions;
 mod transcript;
 mod turn;

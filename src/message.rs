@@ -93,8 +93,8 @@ impl Conversation {
 	}
 }
 
-/// Reads the `messages` array. An error is the message a 400 carries.
-pub fn parse(messages: &[Value]) -> Result<Conversation, String> {
+/// Reads an OpenAI `messages` array. An error is the message a 400 carries.
+pub fn parse_openai(messages: &[Value]) -> Result<Conversation, String> {
 	let mut system = Vec::new();
 	let mut turns = Vec::new();
 	for (index, message) in messages.iter().enumerate() {
@@ -113,11 +113,79 @@ pub fn parse(messages: &[Value]) -> Result<Conversation, String> {
 			other => return Err(format!("messages[{index}]: unknown role {other:?}")),
 		}
 	}
+	conversation(system.join("\n\n"), turns)
+}
+
+/// Reads an Anthropic request's `system` and `messages`. The result is the same `Conversation`
+/// an OpenAI request makes, so a conversation continues its session whichever shape it arrives in.
+pub fn parse_anthropic(system: &Value, messages: &[Value]) -> Result<Conversation, String> {
+	let system = match system {
+		Value::Null => String::new(),
+		Value::String(text) => text.clone(),
+		Value::Array(blocks) => {
+			blocks.iter().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n\n")
+		}
+		_ => return Err("system must be a string or an array of text blocks".into()),
+	};
+	let mut turns = Vec::new();
+	for (index, message) in messages.iter().enumerate() {
+		let role = match message["role"].as_str() {
+			Some("user") => Role::User,
+			Some("assistant") => Role::Assistant,
+			other => return Err(format!("messages[{index}]: unknown role {other:?}")),
+		};
+		let parts = match &message["content"] {
+			Value::String(text) => vec![Part::Text(text.clone())],
+			Value::Array(blocks) => {
+				let mut parts = Vec::new();
+				for block in blocks {
+					if let Some(part) =
+						parse_anthropic_block(block).map_err(|error| format!("messages[{index}]: {error}"))?
+					{
+						parts.push(part);
+					}
+				}
+				parts
+			}
+			_ => {
+				return Err(format!("messages[{index}]: content must be a string or an array of blocks"));
+			}
+		};
+		turns.push(Message { role, parts });
+	}
+	conversation(system, turns)
+}
+
+/// A content block, or nothing for one that is only ever an echo of an earlier answer.
+fn parse_anthropic_block(block: &Value) -> Result<Option<Part>, String> {
+	match block["type"].as_str() {
+		Some("text") => Ok(Some(Part::Text(block["text"].as_str().unwrap_or_default().to_owned()))),
+		Some("image") => {
+			let source = &block["source"];
+			if source["type"].as_str() != Some("base64") {
+				return Err("only base64 image sources are accepted".into());
+			}
+			let mime = source["media_type"].as_str().ok_or("the image has no media_type")?;
+			let data = source["data"].as_str().ok_or("the image has no data")?;
+			image(mime, data).map(Some)
+		}
+		// A client sends the reasoning of an earlier answer back with it; the session that wrote
+		// it already has it, and it is no part of what a conversation is matched on.
+		Some("thinking" | "redacted_thinking") => Ok(None),
+		Some("tool_use" | "tool_result" | "server_tool_use" | "web_search_tool_result") => {
+			Err("function calling is not supported".into())
+		}
+		Some(other) => Err(format!("content block type {other:?} is not supported")),
+		None => Err("content block has no type".into()),
+	}
+}
+
+fn conversation(system: String, mut turns: Vec<Message>) -> Result<Conversation, String> {
 	let last = turns.pop().ok_or("messages has no user or assistant message")?;
 	if last.role != Role::User {
 		return Err("the last message must be the user's".into());
 	}
-	Ok(Conversation { system: system.join("\n\n"), history: turns, last })
+	Ok(Conversation { system, history: turns, last })
 }
 
 fn parse_content(content: &Value) -> Result<Vec<Part>, String> {
@@ -146,12 +214,16 @@ fn parse_data_url(url: &str) -> Result<Part, String> {
 	let rest = url.strip_prefix("data:").ok_or("only data: URLs are accepted for images")?;
 	let (header, data) = rest.split_once(',').ok_or("the data URL has no data")?;
 	let mime = header.strip_suffix(";base64").ok_or("the data URL must be base64")?;
+	image(mime, data)
+}
+
+fn image(mime: &str, data: &str) -> Result<Part, String> {
 	if !mime.starts_with("image/") {
 		return Err(format!("{mime} is not an image type"));
 	}
 	base64::engine::general_purpose::STANDARD
 		.decode(data)
-		.map_err(|_| "the data URL is not valid base64".to_owned())?;
+		.map_err(|_| "the image is not valid base64".to_owned())?;
 	Ok(Part::Image { mime: mime.to_owned(), data: data.to_owned() })
 }
 
@@ -163,7 +235,7 @@ mod tests {
 
 	#[test]
 	fn splits_system_history_and_last() {
-		let conversation = parse(&[
+		let conversation = parse_openai(&[
 			json!({ "role": "system", "content": "Be brief." }),
 			json!({ "role": "user", "content": "Hi" }),
 			json!({ "role": "assistant", "content": "Hello." }),
@@ -196,6 +268,46 @@ mod tests {
 
 	#[test]
 	fn the_last_message_is_the_users() {
-		assert!(parse(&[json!({ "role": "assistant", "content": "Hi" })]).is_err());
+		assert!(parse_openai(&[json!({ "role": "assistant", "content": "Hi" })]).is_err());
+	}
+
+	#[test]
+	fn an_anthropic_request_matches_the_openai_one() {
+		let anthropic = parse_anthropic(
+			&json!([{ "type": "text", "text": "Be brief." }]),
+			&[
+				json!({ "role": "user", "content": "Hi" }),
+				json!({ "role": "assistant", "content": [
+					{ "type": "thinking", "thinking": "...", "signature": "" },
+					{ "type": "text", "text": "Hello." },
+				] }),
+				json!({ "role": "user", "content": "Again" }),
+			],
+		)
+		.unwrap();
+		let openai = parse_openai(&[
+			json!({ "role": "system", "content": "Be brief." }),
+			json!({ "role": "user", "content": "Hi" }),
+			json!({ "role": "assistant", "content": "Hello." }),
+			json!({ "role": "user", "content": "Again" }),
+		])
+		.unwrap();
+		assert_eq!(anthropic.system, openai.system);
+		assert_eq!(anthropic.history_keys(), openai.history_keys());
+	}
+
+	#[test]
+	fn an_anthropic_image_must_be_inline() {
+		let url =
+			json!({ "type": "image", "source": { "type": "url", "url": "https://example.com/a.png" } });
+		assert!(parse_anthropic_block(&url).is_err());
+		let inline = json!({ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "iVBORw0K" } });
+		assert!(matches!(parse_anthropic_block(&inline), Ok(Some(Part::Image { .. }))));
+	}
+
+	#[test]
+	fn anthropic_tool_blocks_are_refused() {
+		let block = json!({ "type": "tool_result", "tool_use_id": "x", "content": "42" });
+		assert!(parse_anthropic_block(&block).is_err());
 	}
 }

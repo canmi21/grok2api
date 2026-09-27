@@ -2,17 +2,47 @@
 
 What a client of grok2api sees. How the answers are produced is [bridge.md](bridge.md).
 
-## Two endpoints, OpenAI's shape
+## Two API shapes: OpenAI's Chat Completions and Anthropic's Messages
 
-- `POST /v1/chat/completions`, both streamed (server-sent events, `stream: true`) and not.
-- `GET /v1/models`, listing the models the resident agent offers. The list is read from the
-  agent, not written down here, because the subscription decides it and it changes: the same
-  account showed two models before signing in and four after.
+These are the two shapes clients are written against. Chat Completions is what nearly every
+client and SDK speaks; Messages is what Anthropic's SDKs and the tools built on them speak. Both
+are answered by the same sessions: a conversation begun in one shape continues in the other,
+because both parse to the same messages and the session is keyed on those.
 
-Nothing else for now. `/v1/responses` and Anthropic's `/v1/messages` were considered and left
-out; the chat completions shape is the one nearly every client speaks.
+- `POST /v1/chat/completions` and `POST /v1/messages`, each streamed and not.
+- `GET /v1/models` and `GET /v1/models/{id}`, the models the resident agent offers. The list is
+  read from the agent, not written down here, because the subscription decides it and it
+  changes: the same account showed two models before signing in and four after. A request
+  carrying `anthropic-version`, which Anthropic's SDKs send on every call, gets Anthropic's
+  shape; any other gets OpenAI's.
 
-## Reasoning is returned, as `reasoning_content`
+The key is accepted as `Authorization: Bearer` or as `x-api-key`, the header each family of SDKs
+sends. Errors take the shape of the API the request spoke.
+
+OpenAI's newer Responses API (`/v1/responses`) is a third shape, and the one Codex speaks. It is
+not served yet.
+
+## Structured output is the CLI's own
+
+A request may constrain the answer to a JSON Schema: `response_format` with `json_schema` (or
+`json_object`, any object) in Chat Completions, `output_config.format` or the older
+`output_format` in Messages. The schema is passed to the agent as the prompt's
+`_meta.outputSchema`, the ACP side of the CLI's `--json-schema`, and the answer is JSON matching
+it. It is a constraint the CLI enforces, measured to hold, rather than an instruction in the
+prompt that the model may or may not follow.
+
+## Anthropic's thinking and effort
+
+Messages returns reasoning as a `thinking` block only when the request turned thinking on
+(`thinking.type` `enabled` or `adaptive`), as Anthropic does; its `signature` is empty, because
+the CLI has none to give. The effort is `output_config.effort` where given, `max` read as the
+CLI's `xhigh`; otherwise a thinking budget is read as a level -- under 4096 tokens low, under
+16384 medium, above that high -- since the CLI takes levels, not budgets.
+
+Anthropic counts `input_tokens` without the cached part and reports that part beside it; OpenAI
+counts it within `prompt_tokens`. Each shape gets its own convention from the same numbers.
+
+## Chat Completions returns reasoning as `reasoning_content`
 
 The agent streams its reasoning as `agent_thought_chunk`. grok2api returns it rather than dropping
 it, in the `reasoning_content` field beside `content` -- on the message when not streaming, on the
@@ -38,11 +68,12 @@ them would refuse most clients for settings that rarely change an answer's use.
 shape -- several choices -- and answering with one would be a wrong answer rather than an
 approximate one.
 
-## Images arrive as data URLs, and only so
+## Images arrive inline, and only so
 
-An `image_url` content part whose URL is a `data:` URL is decoded and sent to the agent as an
-`image` block, which the model sees ([bridge.md](bridge.md), "Images reach the model"). A part
-whose URL is anything else is refused. grok2api does not fetch URLs on a caller's behalf: that
+An `image_url` content part whose URL is a `data:` URL, or a Messages `image` block whose source is
+`base64`, is decoded and sent to the agent as an `image` block, which the model sees
+([bridge.md](bridge.md), "Images reach the model"). An image by any other URL or source is
+refused. grok2api does not fetch URLs on a caller's behalf: that
 would make it an open fetcher sitting on a server, reaching whatever address a request names.
 
 ## What a request must be
