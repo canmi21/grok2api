@@ -71,7 +71,9 @@ async fn serve() -> Result<()> {
 	tracing::info!(version = %agent.info.version, models = ?agent.info.models, "agent ready");
 
 	let bridge = Arc::new(Bridge::new(agent, environment, config.session_idle));
-	let twitter = Arc::new(twitter::Service::new(bridge.clone(), &config.twitter));
+	let twitter = Arc::new(
+		twitter::Service::new(bridge.clone(), &config.twitter).context("cannot keep X answers")?,
+	);
 	let (sessions, latest) = (bridge.clone(), twitter.clone());
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(EXPIRY_SWEEP);

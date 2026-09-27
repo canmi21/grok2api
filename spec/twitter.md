@@ -112,9 +112,20 @@ answered `202 Accepted` with `Retry-After`, and the fetch starts. Every request 
 refresh per request key runs at a time, so a client polling does not multiply the cost. With it
 off, a request waits for its own fetch, tens of seconds, and is always current.
 
-The latest results are held in memory for this and for nothing else. They are not a cache: nothing
-is served from them without a refresh following, and what a client may keep is still said by
-`Cache-Control` below.
+The latest results are held in memory for this. They are not a cache: nothing is served from them
+without a refresh following -- except a settled answer, below.
+
+## Settled answers are kept, and never fetched again
+
+An answer marked `immutable` (below) cannot change, so fetching it again would spend the
+subscription to learn nothing. grok2api keeps it and answers every later request for it from what
+it kept, fast response or not, with no refresh behind. Only a successful answer settles: a `404`
+may be a post not yet indexed, and is fetched again like anything else.
+
+Settled answers are kept on the volume, under `twitter/`, one file per request, not in memory:
+memory is lost with every restart, and would grow without bound with every old post anyone asks
+for, while a file is about two kilobytes and outlives the process. Deleting the directory is how
+they are cleared. The other answers stay in memory alone and are forgotten after a day unasked.
 
 ## Freshness is Cache-Control, and the cache is the CDN's
 

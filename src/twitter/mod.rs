@@ -35,14 +35,15 @@ pub struct Service {
 }
 
 impl Service {
-	pub fn new(bridge: Arc<Bridge>, config: &config::Twitter) -> Self {
+	pub fn new(bridge: Arc<Bridge>, config: &config::Twitter) -> std::io::Result<Self> {
 		let settings = Settings { budget: config.budget, effort: config.effort.clone() };
-		Self {
+		let store = Store::new(bridge.environment.twitter.clone())?;
+		Ok(Self {
 			bridge,
 			settings: Arc::new(settings),
 			fast_response: config.fast_response,
-			store: Arc::default(),
-		}
+			store: Arc::new(store),
+		})
 	}
 
 	/// Forgets the latest results nobody has asked for in a day; run on a timer.
@@ -58,9 +59,13 @@ impl Service {
 				return respond(StatusCode::BAD_REQUEST, body, job::NO_STORE, None);
 			}
 		};
-		// Every request refreshes; one refresh per key runs at a time (spec/twitter.md).
-		let (bridge, settings) = (self.bridge.clone(), self.settings.clone());
 		let latest = self.store.latest(&key);
+		// What can no longer change is answered as it was kept, fast response or not.
+		if let Some(settled) = latest.as_ref().filter(|reply| reply.is_settled()) {
+			return reply_response(settled);
+		}
+		// Everything else refreshes on every request, one refresh per key at a time.
+		let (bridge, settings) = (self.bridge.clone(), self.settings.clone());
 		let mut refreshed =
 			self.store.refresh(&key, async move { fetch::run(&bridge, &settings, &task).await });
 		if self.fast_response {

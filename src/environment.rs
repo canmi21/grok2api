@@ -89,6 +89,8 @@ pub struct Environment {
 	pub workspace: PathBuf,
 	/// The CLI binaries grok2api manages (spec/deployment.md).
 	pub cli: PathBuf,
+	/// X answers that can no longer change (spec/twitter.md); deleting it clears them.
+	pub twitter: PathBuf,
 }
 
 impl Environment {
@@ -99,6 +101,7 @@ impl Environment {
 			grok_home: root.join("grok"),
 			workspace: root.join("workspace"),
 			cli: root.join("cli"),
+			twitter: root.join("twitter"),
 		};
 		for dir in [&environment.home, &environment.grok_home, &environment.workspace] {
 			std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;

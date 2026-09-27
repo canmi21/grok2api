@@ -55,6 +55,11 @@ impl Reply {
 		Self { cache_control: job::RECENT, ..Self::error(StatusCode::NOT_FOUND, "not_found", message) }
 	}
 
+	/// Whether it can no longer change, and so is kept and never fetched again (spec/twitter.md).
+	pub fn is_settled(&self) -> bool {
+		self.status == StatusCode::OK && self.cache_control == job::IMMUTABLE
+	}
+
 	/// Whether it may replace an earlier answer to the same request. A failure may not: an answer
 	/// that was right a minute ago is a better one to give than an error.
 	pub fn is_answer(&self) -> bool {

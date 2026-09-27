@@ -1,14 +1,20 @@
 //! The latest answer to each request, and the one refresh of it that may run at a time. Fast
-//! response answers from here and refreshes behind (spec/twitter.md, "Fast response").
+//! response answers from here and refreshes behind (spec/twitter.md, "Fast response"). An answer
+//! that can no longer change is also written to the volume and never fetched again ("Settled
+//! answers are kept").
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::http::StatusCode;
+use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use super::fetch::Reply;
+use super::job;
 
 struct Latest {
 	reply: Arc<Reply>,
@@ -24,15 +30,26 @@ struct Inner {
 #[derive(Default)]
 pub struct Store {
 	inner: Mutex<Inner>,
+	/// Where settled answers are kept; none in tests that do not need it.
+	settled: Option<PathBuf>,
 }
 
 impl Store {
-	/// The latest answer to `key`, if there is one.
+	pub fn new(settled: PathBuf) -> std::io::Result<Self> {
+		std::fs::create_dir_all(&settled)?;
+		Ok(Self { inner: Mutex::default(), settled: Some(settled) })
+	}
+
+	/// The latest answer to `key`, if there is one: in memory, or else settled on the volume.
 	pub fn latest(&self, key: &str) -> Option<Arc<Reply>> {
 		let mut inner = self.inner.lock().unwrap();
-		let latest = inner.latest.get_mut(key)?;
-		latest.asked = Instant::now();
-		Some(latest.reply.clone())
+		if let Some(latest) = inner.latest.get_mut(key) {
+			latest.asked = Instant::now();
+			return Some(latest.reply.clone());
+		}
+		let reply = Arc::new(self.read_settled(key)?);
+		inner.latest.insert(key.to_owned(), Latest { reply: reply.clone(), asked: Instant::now() });
+		Some(reply)
 	}
 
 	/// Refreshes `key`, or joins the refresh already running for it; the receiver gets its reply.
@@ -64,7 +81,40 @@ impl Store {
 		let mut inner = self.inner.lock().unwrap();
 		let holds_answer = inner.latest.get(key).is_some_and(|latest| latest.reply.is_answer());
 		if reply.is_answer() || !holds_answer {
+			if reply.is_settled() {
+				self.write_settled(key, &reply);
+			}
 			inner.latest.insert(key.to_owned(), Latest { reply, asked: Instant::now() });
+		}
+	}
+
+	fn path(&self, key: &str) -> Option<PathBuf> {
+		Some(self.settled.as_ref()?.join(format!("{:016x}.json", fnv1a(key))))
+	}
+
+	/// A settled answer from the volume. The file carries its key, so two keys sharing a hash never
+	/// answer for each other.
+	fn read_settled(&self, key: &str) -> Option<Reply> {
+		let stored: Value = serde_json::from_slice(&std::fs::read(self.path(key)?).ok()?).ok()?;
+		if stored["key"] != key {
+			return None;
+		}
+		Some(Reply {
+			status: StatusCode::from_u16(stored["status"].as_u64()? as u16).ok()?,
+			body: stored["body"].clone(),
+			cache_control: job::IMMUTABLE,
+		})
+	}
+
+	/// Written beside and moved into place, so a reader never sees half a file.
+	fn write_settled(&self, key: &str, reply: &Reply) {
+		let Some(path) = self.path(key) else { return };
+		let stored = json!({ "key": key, "status": reply.status.as_u16(), "body": reply.body });
+		let partial = path.with_extension("partial");
+		let written =
+			std::fs::write(&partial, stored.to_string()).and_then(|()| std::fs::rename(&partial, &path));
+		if let Err(error) = written {
+			tracing::warn!(%error, key, "could not keep a settled answer");
 		}
 	}
 
@@ -76,10 +126,18 @@ impl Store {
 		}
 	}
 
-	/// Forgets what nobody has asked for in `idle`.
+	/// Forgets from memory what nobody has asked for in `idle`. Settled answers stay on the volume.
 	pub fn sweep(&self, idle: Duration) {
 		self.inner.lock().unwrap().latest.retain(|_, latest| latest.asked.elapsed() < idle);
 	}
+}
+
+/// FNV-1a, 64 bits: a stable file name for a key of any length. Stability across releases is what
+/// matters, which the standard library's hasher does not promise.
+fn fnv1a(text: &str) -> u64 {
+	text
+		.bytes()
+		.fold(0xcbf29ce484222325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3))
 }
 
 struct Refreshing {
@@ -141,5 +199,28 @@ mod tests {
 		store.keep("k", Arc::new(reply(StatusCode::OK)));
 		store.sweep(Duration::ZERO);
 		assert!(store.latest("k").is_none());
+	}
+
+	#[tokio::test]
+	async fn a_settled_answer_outlives_memory() {
+		let dir = std::env::temp_dir().join(format!("grok2api-settled-{}", std::process::id()));
+		let store = Arc::new(Store::new(dir.clone()).unwrap());
+		let settled = || Reply {
+			status: StatusCode::OK,
+			body: json!({ "data": 1 }),
+			cache_control: job::IMMUTABLE,
+		};
+		store.refresh("old", async move { settled() }).recv().await.unwrap();
+		store.refresh("new", async { reply(StatusCode::OK) }).recv().await.unwrap();
+		store.sweep(Duration::ZERO);
+		assert_eq!(
+			store.latest("old").unwrap().body,
+			json!({ "data": 1 }),
+			"read back from the volume"
+		);
+		assert!(store.latest("new").is_none(), "a recent answer lives in memory only");
+		let reopened = Store::new(dir.clone()).unwrap();
+		assert!(reopened.latest("old").unwrap().is_settled(), "and survives a restart");
+		std::fs::remove_dir_all(dir).unwrap();
 	}
 }

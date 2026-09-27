@@ -55,6 +55,21 @@ fn ids(answer: &Answer) -> Vec<u128> {
 pub async fn run_all(server: &Server) {
 	answers_at_once_and_refreshes_behind(server).await;
 	println!("test twitter::answers_at_once_and_refreshes_behind ... ok");
+	keeps_what_can_no_longer_change(server).await;
+	println!("test twitter::keeps_what_can_no_longer_change ... ok");
+}
+
+/// Asks until the answer is no longer `202`.
+async fn settle(server: &Server, path: &str) -> Answer {
+	let mut answer = fetch(server, path).await;
+	for _ in 0..50 {
+		if answer.status != 202 {
+			break;
+		}
+		tokio::time::sleep(Duration::from_millis(100)).await;
+		answer = fetch(server, path).await;
+	}
+	answer
 }
 
 pub async fn run_waiting(server: &Server) {
@@ -79,26 +94,16 @@ pub async fn run_waiting(server: &Server) {
 }
 
 async fn answers_at_once_and_refreshes_behind(server: &Server) {
-	let path = "/twitter/posts/2104132837968580724";
+	let path = "/twitter/posts/2104132837968580727";
 	let first = fetch(server, path).await;
 	assert_eq!(first.status, 202, "nothing held yet: {:?}", first.body);
 	assert_eq!(first.cache_control, "no-store");
 	assert_eq!(first.retry_after.as_deref(), Some("10"));
 
-	let mut answer = fetch(server, path).await;
-	for _ in 0..50 {
-		if answer.status == 200 {
-			break;
-		}
-		tokio::time::sleep(Duration::from_millis(100)).await;
-		answer = fetch(server, path).await;
-	}
+	let answer = settle(server, path).await;
 	assert_eq!(answer.status, 200);
-	let post = &answer.body["data"];
-	assert_eq!(post["url"], "https://x.com/fake_user/status/2104132837968580724");
-	assert_eq!(post["quoted"]["id"], "2104132837968580723");
-	assert_eq!(post["media"][0]["url"], "https://pbs.twimg.com/media/fake.jpg");
-	assert_eq!(answer.cache_control, IMMUTABLE, "posted in 2025");
+	assert_eq!(answer.body["data"]["url"], "https://x.com/fake_user/status/2104132837968580727");
+	assert_eq!(answer.cache_control, RECENT, "posted within the hour");
 
 	let before = fetches(server).await;
 	let again = fetch(server, path).await;
@@ -110,6 +115,25 @@ async fn answers_at_once_and_refreshes_behind(server: &Server) {
 		tokio::time::sleep(Duration::from_millis(100)).await;
 	}
 	panic!("the request did not refresh what it answered from");
+}
+
+async fn keeps_what_can_no_longer_change(server: &Server) {
+	let path = "/twitter/posts/2104132837968580724";
+	let answer = settle(server, path).await;
+	assert_eq!(answer.status, 200);
+	let post = &answer.body["data"];
+	assert_eq!(post["quoted"]["id"], "2104132837968580723");
+	assert_eq!(post["media"][0]["url"], "https://pbs.twimg.com/media/fake.jpg");
+	assert_eq!(answer.cache_control, IMMUTABLE, "posted in 2025");
+	let kept = std::fs::read_dir(server._data.0.join("twitter")).unwrap().count();
+	assert!(kept >= 1, "kept on the volume");
+
+	let before = fetches(server).await;
+	for _ in 0..3 {
+		assert_eq!(fetch(server, path).await.cache_control, IMMUTABLE);
+	}
+	tokio::time::sleep(Duration::from_millis(300)).await;
+	assert_eq!(fetches(server).await, before, "a settled post is never fetched again");
 }
 
 async fn reads_a_post_and_keeps_it_by_age(server: &Server) {
