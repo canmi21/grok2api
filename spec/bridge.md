@@ -81,6 +81,13 @@ while answering about an image. The system prompt grok2api sends says plainly th
 be used; a tool call that still arrives is denied, and a permission request from the agent is
 answered with a refusal, never an approval.
 
+## When the agent goes, so does the server
+
+A server whose agent has exited cannot answer anything, and restarting the agent in place would
+lose every session anyway. So grok2api exits with it, and the restart belongs to whatever runs the
+process -- the container's restart policy ([deployment.md](deployment.md)). That keeps one way to
+recover rather than two.
+
 ## A clean environment is checked, not assumed
 
 Two failures are silent, and both undo the section above:

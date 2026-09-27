@@ -45,6 +45,21 @@ An `image_url` content part whose URL is a `data:` URL is decoded and sent to th
 whose URL is anything else is refused. grok2api does not fetch URLs on a caller's behalf: that
 would make it an open fetcher sitting on a server, reaching whatever address a request names.
 
+## What a request must be
+
+A request is refused, rather than approximated, where its messages cannot be answered as sent:
+
+- **The last message is the user's.** The last message is what the agent is prompted with; an
+  assistant message last would be a prefill, which the agent has no way to take.
+- **No `tool` messages.** They carry results of calls grok2api never made
+  (see "Function calling is not supported").
+- **A model the agent offers**, or none, which means the agent's default. An unknown model is a
+  404 with the code `model_not_found`, as OpenAI answers it, because a client that named a model
+  it cannot have should be told rather than served another one.
+
+`system` and `developer` messages, wherever they sit, together form the system prompt a session
+is created with; `developer` is the newer name for the same role.
+
 ## Every interface, one port, one key
 
 The server listens on all addresses on one configured port, because it runs on a server and is
