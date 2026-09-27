@@ -3,3 +3,6 @@
 
 # OS and editor noise.
 .DS_Store
+
+# The default GROK2API_DATA_DIR: the agent's environment and the CLI's credentials.
+/data

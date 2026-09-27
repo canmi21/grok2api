@@ -11,6 +11,16 @@ repository = "https://github.com/canmi21/grok2api"
 description = "An OpenAI-compatible API served from the Grok Build CLI's subscription."
 
 [dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
 
 # clippy carries no style lints; rustfmt owns layout. See the workspace's spec/lint-format.md.
 [lints.clippy]
