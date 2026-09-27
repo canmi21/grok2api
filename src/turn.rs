@@ -88,6 +88,7 @@ impl Bridge {
 			continued,
 			turns = session.history.len() / 2 + 1,
 			model = %session.model,
+			cli = %session.agent.info.version,
 			"completion"
 		);
 
