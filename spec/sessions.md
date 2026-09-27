@@ -24,6 +24,15 @@ A conversation the client edited -- a changed earlier message, a regenerated rep
 system prompt -- no longer extends any session, and so starts a new one. That is correct rather
 than a miss: the session's history is no longer the client's.
 
+## Or it names the reply it continues
+
+A Responses request may continue by id instead (`previous_response_id`, api.md). Each session
+remembers the id its latest answer went out under, and a request naming that id continues it,
+whatever else it carries; anything it sends ahead of its last message is new to the session and is
+seeded the way a new session's history is, below. The id is the answer's, not the session's, so
+only the latest answer can be continued from -- an older one would fork a conversation the session
+has already moved past.
+
 ## A session lives for a day of idleness
 
 A session is kept for 24 hours after it last answered, then closed and forgotten; the period is a

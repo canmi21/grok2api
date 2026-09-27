@@ -31,14 +31,17 @@ async fn answer(state: &AppState, body: &Value) -> Result<Response, Failure> {
 		body["messages"].as_array().ok_or_else(|| Failure::invalid("messages is required"))?;
 	let conversation = message::parse_openai(messages).map_err(Failure::invalid)?;
 	let model = http::resolve_model(&state.bridge, body["model"].as_str())?;
+	let id = format!("chatcmpl-{}", http::random_id());
 	let request = turn::Request {
 		conversation,
 		model: model.clone(),
 		effort: body["reasoning_effort"].as_str().map(str::to_owned),
 		schema: schema(&body["response_format"]),
+		reply_id: id.clone(),
+		previous: None,
 	};
 	let mut updates = http::start(&state.bridge, request).await?;
-	let head = Head { id: format!("chatcmpl-{}", http::random_id()), created: http::now(), model };
+	let head = Head { id, created: http::now(), model };
 	if body["stream"].as_bool().unwrap_or(false) {
 		let include_usage = body["stream_options"]["include_usage"].as_bool().unwrap_or(false);
 		return Ok(streamed(Chunks { head, include_usage }, updates).into_response());

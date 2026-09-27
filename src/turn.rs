@@ -35,7 +35,24 @@ pub struct Request {
 	pub effort: Option<String>,
 	/// A JSON Schema the answer must match (spec/api.md, "Structured output").
 	pub schema: Option<Value>,
+	/// The id this answer is returned under; a later request may name it to continue.
+	pub reply_id: String,
+	/// The reply this request continues, when it says so rather than resending the conversation:
+	/// the Responses API's `previous_response_id` (spec/sessions.md).
+	pub previous: Option<String>,
 }
+
+/// A request named a reply to continue that no idle session holds.
+#[derive(Debug)]
+pub struct UnknownReply(pub String);
+
+impl std::fmt::Display for UnknownReply {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "no conversation continues from {}; it expired or was never made", self.0)
+	}
+}
+
+impl std::error::Error for UnknownReply {}
 
 /// What a turn produces, in the agent's terms; each API shape renders it its own way.
 pub enum Update {
@@ -91,11 +108,20 @@ impl Bridge {
 	/// Prepares the session and starts the prompt. An error here is the request's, returned before
 	/// any byte of the response; a failure after it arrives as `Update::Failed`.
 	pub async fn start(self: &Arc<Self>, request: Request) -> Result<mpsc::Receiver<Update>> {
-		let Request { conversation, model, effort, schema } = request;
+		let Request { conversation, model, effort, schema, reply_id, previous } = request;
 		let history = conversation.history_keys();
-		let (mut session, mut blocks, continued) = match self.pool.claim(&conversation.system, &history)
-		{
-			Some(session) => (session, Vec::new(), true),
+		let claimed = match &previous {
+			Some(previous) => {
+				let mut session =
+					self.pool.claim_reply(previous).ok_or_else(|| UnknownReply(previous.clone()))?;
+				// What the request carries ahead of its last message is new to the session.
+				session.history.extend(history.iter().cloned());
+				Some((session, seed_blocks(&conversation.history)))
+			}
+			None => self.pool.claim(&conversation.system, &history).map(|session| (session, Vec::new())),
+		};
+		let (mut session, mut blocks, continued) = match claimed {
+			Some((session, blocks)) => (session, blocks, true),
 			None => {
 				let agent = self.agent();
 				let id = agent
@@ -104,10 +130,7 @@ impl Bridge {
 				let model = agent.info.default_model.clone();
 				let mut session = Session::new(agent, id, conversation.system.clone(), model);
 				session.history = history;
-				let seed = render_history(&conversation.history);
-				let blocks =
-					if seed.is_empty() { Vec::new() } else { vec![json!({ "type": "text", "text": seed })] };
-				(session, blocks, false)
+				(session, seed_blocks(&conversation.history), false)
 			}
 		};
 		if let Err(error) = self.configure(&mut session, &model, effort.as_deref()).await {
@@ -124,6 +147,7 @@ impl Bridge {
 			"completion"
 		);
 
+		session.last_reply = Some(reply_id);
 		let (tx, rx) = mpsc::channel(64);
 		let bridge = self.clone();
 		tokio::spawn(
@@ -219,6 +243,12 @@ impl Bridge {
 			session.agent.close(&session.id).await;
 		}
 	}
+}
+
+/// The earlier turns rendered for a session that has not seen them, as the prompt's first block.
+fn seed_blocks(history: &[Message]) -> Vec<Value> {
+	let seed = render_history(history);
+	if seed.is_empty() { Vec::new() } else { vec![json!({ "type": "text", "text": seed })] }
 }
 
 fn system_prompt(client: &str) -> String {

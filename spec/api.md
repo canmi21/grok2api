@@ -2,14 +2,15 @@
 
 What a client of grok2api sees. How the answers are produced is [bridge.md](bridge.md).
 
-## Two API shapes: OpenAI's Chat Completions and Anthropic's Messages
+## Three API shapes: Chat Completions, Responses and Messages
 
-These are the two shapes clients are written against. Chat Completions is what nearly every
-client and SDK speaks; Messages is what Anthropic's SDKs and the tools built on them speak. Both
-are answered by the same sessions: a conversation begun in one shape continues in the other,
-because both parse to the same messages and the session is keyed on those.
+These are the shapes clients are written against. Chat Completions is what nearly every client
+and SDK speaks; Responses is OpenAI's newer one, and the only one Codex speaks; Messages is what
+Anthropic's SDKs and the tools built on them speak. All three are answered by the same sessions: a
+conversation begun in one shape continues in another, because each parses to the same messages
+and the session is keyed on those.
 
-- `POST /v1/chat/completions` and `POST /v1/messages`, each streamed and not.
+- `POST /v1/chat/completions`, `POST /v1/responses` and `POST /v1/messages`, each streamed and not.
 - `GET /v1/models` and `GET /v1/models/{id}`, the models the resident agent offers. The list is
   read from the agent, not written down here, because the subscription decides it and it
   changes: the same account showed two models before signing in and four after. A request
@@ -19,13 +20,24 @@ because both parse to the same messages and the session is keyed on those.
 The key is accepted as `Authorization: Bearer` or as `x-api-key`, the header each family of SDKs
 sends. Errors take the shape of the API the request spoke.
 
-OpenAI's newer Responses API (`/v1/responses`) is a third shape, and the one Codex speaks. It is
-not served yet.
+## Responses: state by id, reasoning by request
+
+Responses lets a client continue by naming the response it continues, `previous_response_id`,
+instead of sending the conversation again. That is the session the reply came from, so it is
+served the same way (sessions.md); an id no idle session holds -- expired, or never made -- is a
+400 naming it, as OpenAI answers an unknown one. A client that sends the whole conversation, as
+Codex does with `store: false`, is matched like any other.
+
+Reasoning comes back as a `reasoning` item's summary only when the request set
+`reasoning.summary`, as OpenAI returns it. `reasoning.effort` is passed on, with `none` and
+`minimal`, below the CLI's lowest level, read as `low`. A response the agent stopped for length is
+`incomplete` with `max_output_tokens`, not `completed`.
 
 ## Structured output is the CLI's own
 
 A request may constrain the answer to a JSON Schema: `response_format` with `json_schema` (or
-`json_object`, any object) in Chat Completions, `output_config.format` or the older
+`json_object`, any object) in Chat Completions, `text.format` in Responses, `output_config.format`
+or the older
 `output_format` in Messages. The schema is passed to the agent as the prompt's
 `_meta.outputSchema`, the ACP side of the CLI's `--json-schema`, and the answer is JSON matching
 it. It is a constraint the CLI enforces, measured to hold, rather than an instruction in the

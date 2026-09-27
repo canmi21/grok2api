@@ -97,6 +97,11 @@ impl Server {
 		(status, serde_json::from_str(&text).unwrap())
 	}
 
+	async fn responses(&self, body: Value) -> (u16, Value) {
+		let (status, text) = self.post("/v1/responses", body, &[("authorization", BEARER)]).await;
+		(status, serde_json::from_str(&text).unwrap())
+	}
+
 	async fn messages(&self, body: Value) -> (u16, Value) {
 		let (status, text) = self.post("/v1/messages", body, &[("x-api-key", KEY)]).await;
 		(status, serde_json::from_str(&text).unwrap())
@@ -161,6 +166,9 @@ async fn run_all() {
 		continues_across_shapes,
 		refuses_tools_the_agent_asks_for,
 		cancels_when_the_client_leaves,
+		answers_responses,
+		streams_responses_events,
+		continues_by_previous_response_id,
 	);
 }
 
@@ -377,4 +385,102 @@ async fn cancels_when_the_client_leaves(server: &Server) {
 		}
 	}
 	panic!("the agent was never told to cancel");
+}
+
+/// The text of a Responses answer's message item.
+fn output_text(response: &Value) -> String {
+	let message =
+		response["output"].as_array().unwrap().iter().find(|item| item["type"] == "message").unwrap();
+	message["content"][0]["text"].as_str().unwrap().to_owned()
+}
+
+async fn answers_responses(server: &Server) {
+	let (status, response) =
+		server.responses(json!({ "input": "hello", "instructions": "be brief" })).await;
+	assert_eq!(status, 200);
+	assert_eq!(response["object"], "response");
+	assert_eq!(response["status"], "completed");
+	assert!(response["id"].as_str().unwrap().starts_with("resp_"));
+	assert_eq!(
+		response["output"].as_array().unwrap().len(),
+		1,
+		"no reasoning unless a summary is asked for"
+	);
+	assert_eq!(field(&output_text(&response), "said"), "hello");
+	assert_eq!(response["usage"]["input_tokens_details"]["cached_tokens"], 40);
+
+	let body = json!({
+		"reasoning": { "effort": "minimal", "summary": "auto" },
+		"text": { "format": { "type": "json_schema", "name": "x", "schema": { "type": "object" } } },
+		"input": [{ "role": "user", "content": [
+			{ "type": "input_text", "text": "look" },
+			{ "type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=" },
+		] }],
+	});
+	let (_, response) = server.responses(body).await;
+	assert_eq!(response["output"][0]["type"], "reasoning");
+	let text = output_text(&response);
+	assert_eq!(
+		(field(&text, "effort"), field(&text, "images"), field(&text, "schema")),
+		("low", "1", "true")
+	);
+
+	let (status, reply) = server
+		.responses(
+			json!({ "input": [{ "type": "function_call_output", "call_id": "1", "output": "42" }] }),
+		)
+		.await;
+	assert_eq!(status, 400);
+	assert!(reply["error"]["message"].is_string());
+}
+
+async fn streams_responses_events(server: &Server) {
+	let body = json!({ "stream": true, "reasoning": { "summary": "auto" }, "input": "s" });
+	let (status, text) = server.post("/v1/responses", body, &[("authorization", BEARER)]).await;
+	assert_eq!(status, 200);
+	let events = events(&text);
+	let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+	assert_eq!(names.first(), Some(&"response.created"));
+	assert_eq!(names.last(), Some(&"response.completed"));
+	assert_eq!(names.iter().filter(|name| **name == "response.output_item.added").count(), 2);
+	let numbers: Vec<u64> = events
+		.iter()
+		.map(|(_, data)| {
+			serde_json::from_str::<Value>(data).unwrap()["sequence_number"].as_u64().unwrap()
+		})
+		.collect();
+	assert_eq!(numbers, (0..numbers.len() as u64).collect::<Vec<_>>());
+	let completed: Value = serde_json::from_str(&events.last().unwrap().1).unwrap();
+	assert_eq!(field(&output_text(&completed["response"]), "said"), "s");
+}
+
+async fn continues_by_previous_response_id(server: &Server) {
+	let (_, first) = server.responses(json!({ "input": "first" })).await;
+	let session = field(&output_text(&first), "session").to_owned();
+	let (_, second) =
+		server.responses(json!({ "previous_response_id": first["id"], "input": "second" })).await;
+	let text = output_text(&second);
+	assert_eq!(field(&text, "session"), session);
+	assert_eq!((field(&text, "turn"), field(&text, "said")), ("2", "second"));
+	assert_eq!(second["previous_response_id"], first["id"]);
+
+	let resent = json!([
+		{ "role": "user", "content": "first" },
+		{ "role": "assistant", "content": [{ "type": "output_text", "text": output_text(&first) }] },
+		{ "role": "user", "content": "second" },
+		{ "role": "assistant", "content": [{ "type": "output_text", "text": text }] },
+		{ "role": "user", "content": "third" },
+	]);
+	let (_, third) = server.responses(json!({ "input": resent })).await;
+	assert_eq!(
+		field(&output_text(&third), "session"),
+		session,
+		"a resent conversation continues too"
+	);
+	assert_eq!(field(&output_text(&third), "turn"), "3");
+
+	let (status, reply) =
+		server.responses(json!({ "previous_response_id": "resp_nope", "input": "x" })).await;
+	assert_eq!(status, 400);
+	assert!(reply["error"]["message"].as_str().unwrap().contains("resp_nope"));
 }

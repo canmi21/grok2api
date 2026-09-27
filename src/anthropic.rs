@@ -27,15 +27,17 @@ async fn answer(state: &AppState, body: &Value) -> Result<Response, Failure> {
 	let conversation =
 		message::parse_anthropic(&body["system"], messages).map_err(Failure::invalid)?;
 	let model = http::resolve_model(&state.bridge, body["model"].as_str())?;
+	let id = format!("msg_{}", http::random_id());
 	let request = turn::Request {
 		conversation,
 		model: model.clone(),
 		effort: effort(body),
 		schema: schema(body),
+		reply_id: id.clone(),
+		previous: None,
 	};
 	let mut updates = http::start(&state.bridge, request).await?;
-	let head =
-		Head { id: format!("msg_{}", http::random_id()), model, thinking: shows_thinking(body) };
+	let head = Head { id, model, thinking: shows_thinking(body) };
 	if body["stream"].as_bool().unwrap_or(false) {
 		return Ok(streamed(Events::new(head), updates).into_response());
 	}

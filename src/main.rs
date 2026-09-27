@@ -7,6 +7,7 @@ mod environment;
 mod http;
 mod message;
 mod openai;
+mod responses;
 mod sessions;
 mod transcript;
 mod turn;

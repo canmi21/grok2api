@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::turn::{self, Bridge, Update};
-use crate::{anthropic, openai};
+use crate::{anthropic, openai, responses};
 
 /// Images arrive inline, so a request can be far larger than axum's 2 MB default.
 const BODY_LIMIT: usize = 32 * 1024 * 1024;
@@ -34,6 +34,7 @@ pub fn router(bridge: Arc<Bridge>, api_key: String) -> Router {
 		.route("/v1/models/{id}", get(model))
 		.route("/v1/chat/completions", post(openai::chat_completions))
 		.route("/v1/messages", post(anthropic::messages))
+		.route("/v1/responses", post(responses::responses))
 		.layer(middleware::from_fn_with_state(state.clone(), authorize))
 		.layer(DefaultBodyLimit::max(BODY_LIMIT))
 		.with_state(state)
@@ -166,6 +167,9 @@ pub async fn start(
 	request: turn::Request,
 ) -> Result<mpsc::Receiver<Update>, Failure> {
 	bridge.start(request).await.map_err(|error| {
+		if error.is::<turn::UnknownReply>() {
+			return Failure::invalid(error.to_string());
+		}
 		tracing::error!(%error, "a completion could not start");
 		Failure::upstream(error.to_string())
 	})

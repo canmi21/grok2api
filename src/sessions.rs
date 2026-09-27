@@ -15,12 +15,23 @@ pub struct Session<A> {
 	pub history: Vec<MessageKey>,
 	pub model: String,
 	pub effort: Option<String>,
+	/// The id the session's latest answer went out under.
+	pub last_reply: Option<String>,
 	last_used: Instant,
 }
 
 impl<A> Session<A> {
 	pub fn new(agent: A, id: String, system: String, model: String) -> Self {
-		Self { agent, id, system, history: Vec::new(), model, effort: None, last_used: Instant::now() }
+		Self {
+			agent,
+			id,
+			system,
+			history: Vec::new(),
+			model,
+			effort: None,
+			last_reply: None,
+			last_used: Instant::now(),
+		}
 	}
 }
 
@@ -42,6 +53,13 @@ impl<A> Pool<A> {
 		let mut idle = self.idle.lock().unwrap();
 		let index =
 			idle.iter().position(|session| session.system == system && session.history == history)?;
+		Some(idle.swap_remove(index))
+	}
+
+	/// Takes the idle session whose latest answer went out as `reply`, if there is one.
+	pub fn claim_reply(&self, reply: &str) -> Option<Session<A>> {
+		let mut idle = self.idle.lock().unwrap();
+		let index = idle.iter().position(|session| session.last_reply.as_deref() == Some(reply))?;
 		Some(idle.swap_remove(index))
 	}
 
@@ -97,5 +115,15 @@ mod tests {
 		let expired = pool.take_expired();
 		assert_eq!(expired.len(), 1);
 		assert_eq!(expired[0].id, "a");
+	}
+
+	#[test]
+	fn claims_by_the_reply_it_last_gave() {
+		let pool = Pool::new(Duration::from_secs(60));
+		let mut answered = session("a", &["one"]);
+		answered.last_reply = Some("resp_1".into());
+		pool.release(answered);
+		assert!(pool.claim_reply("resp_0").is_none());
+		assert_eq!(pool.claim_reply("resp_1").unwrap().id, "a");
 	}
 }

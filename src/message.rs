@@ -180,6 +180,66 @@ fn parse_anthropic_block(block: &Value) -> Result<Option<Part>, String> {
 	}
 }
 
+/// Reads a Responses request's `instructions` and `input`. `input` is a string, one user message,
+/// or a list of items, of which messages are read and echoed reasoning is passed over.
+pub fn parse_responses(instructions: &Value, input: &Value) -> Result<Conversation, String> {
+	let mut system: Vec<String> = instructions.as_str().map(str::to_owned).into_iter().collect();
+	let items = match input {
+		Value::String(text) => return conversation(join(system), vec![user_text(text)]),
+		Value::Array(items) => items,
+		_ => return Err("input must be a string or an array of items".into()),
+	};
+	let mut turns = Vec::new();
+	for (index, item) in items.iter().enumerate() {
+		let located = |error: String| format!("input[{index}]: {error}");
+		match item["type"].as_str() {
+			Some("message") | None => {}
+			Some("reasoning") => continue,
+			Some(kind) if kind.ends_with("_call") || kind.ends_with("_call_output") => {
+				return Err(located("function calling is not supported".into()));
+			}
+			Some(other) => return Err(located(format!("item type {other:?} is not supported"))),
+		}
+		let parts = match &item["content"] {
+			Value::String(text) => vec![Part::Text(text.clone())],
+			Value::Array(parts) => {
+				parts.iter().map(parse_responses_part).collect::<Result<_, _>>().map_err(located)?
+			}
+			_ => return Err(located("content must be a string or an array of parts".into())),
+		};
+		match item["role"].as_str() {
+			Some("system" | "developer") => system.push(Message { role: Role::User, parts }.text()),
+			Some("user") => turns.push(Message { role: Role::User, parts }),
+			Some("assistant") => turns.push(Message { role: Role::Assistant, parts }),
+			other => return Err(located(format!("unknown role {other:?}"))),
+		}
+	}
+	conversation(join(system), turns)
+}
+
+fn parse_responses_part(part: &Value) -> Result<Part, String> {
+	match part["type"].as_str() {
+		Some("input_text" | "output_text") => {
+			Ok(Part::Text(part["text"].as_str().unwrap_or_default().to_owned()))
+		}
+		Some("refusal") => Ok(Part::Text(part["refusal"].as_str().unwrap_or_default().to_owned())),
+		Some("input_image") => match part["image_url"].as_str() {
+			Some(url) => parse_data_url(url),
+			None => Err("only images given as data: URLs are accepted".into()),
+		},
+		Some(other) => Err(format!("content part type {other:?} is not supported")),
+		None => Err("content part has no type".into()),
+	}
+}
+
+fn user_text(text: &str) -> Message {
+	Message { role: Role::User, parts: vec![Part::Text(text.to_owned())] }
+}
+
+fn join(system: Vec<String>) -> String {
+	system.join("\n\n")
+}
+
 fn conversation(system: String, mut turns: Vec<Message>) -> Result<Conversation, String> {
 	let last = turns.pop().ok_or("messages has no user or assistant message")?;
 	if last.role != Role::User {
@@ -309,5 +369,45 @@ mod tests {
 	fn anthropic_tool_blocks_are_refused() {
 		let block = json!({ "type": "tool_result", "tool_use_id": "x", "content": "42" });
 		assert!(parse_anthropic_block(&block).is_err());
+	}
+
+	#[test]
+	fn a_responses_request_matches_the_openai_one() {
+		let responses = parse_responses(
+			&json!("Be brief."),
+			&json!([
+				{ "role": "user", "content": "Hi" },
+				{ "type": "reasoning", "id": "rs_1", "summary": [] },
+				{ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "Hello." }] },
+				{ "role": "user", "content": [{ "type": "input_text", "text": "Again" }] },
+			]),
+		)
+		.unwrap();
+		let openai = parse_openai(&[
+			json!({ "role": "system", "content": "Be brief." }),
+			json!({ "role": "user", "content": "Hi" }),
+			json!({ "role": "assistant", "content": "Hello." }),
+			json!({ "role": "user", "content": "Again" }),
+		])
+		.unwrap();
+		assert_eq!(responses.system, openai.system);
+		assert_eq!(responses.history_keys(), openai.history_keys());
+		assert_eq!(responses.last.text(), "Again");
+	}
+
+	#[test]
+	fn a_responses_string_is_one_user_message() {
+		let conversation = parse_responses(&Value::Null, &json!("Hi")).unwrap();
+		assert!(conversation.history.is_empty());
+		assert_eq!(conversation.last.text(), "Hi");
+	}
+
+	#[test]
+	fn responses_tool_items_are_refused() {
+		let input = json!([{ "type": "function_call_output", "call_id": "1", "output": "42" }]);
+		assert!(parse_responses(&Value::Null, &input).is_err());
+		let image =
+			json!([{ "role": "user", "content": [{ "type": "input_image", "file_id": "file_1" }] }]);
+		assert!(parse_responses(&Value::Null, &image).is_err());
 	}
 }
