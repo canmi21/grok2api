@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::agent::Agent;
-use crate::environment::Environment;
+use crate::environment::{Environment, Profile};
 use crate::message::{Conversation, Message};
 use crate::sessions;
 use crate::transcript::render_history;
@@ -125,7 +125,11 @@ impl Bridge {
 			None => {
 				let agent = self.agent();
 				let id = agent
-					.new_session(&self.environment.workspace, &system_prompt(&conversation.system))
+					.new_session(
+						&self.environment.workspace,
+						Profile::Chat,
+						&system_prompt(&conversation.system),
+					)
 					.await?;
 				let model = agent.info.default_model.clone();
 				let mut session = Session::new(agent, id, conversation.system.clone(), model);

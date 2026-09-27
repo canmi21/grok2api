@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use tokio::sync::mpsc;
 
 use crate::agent::Agent;
-use crate::environment::Environment;
+use crate::environment::{Environment, Profile};
 
 /// The profile's tool definitions measured 698 tokens and the default agent's 8.8k; the bound
 /// sits well between, so a CLI release that grows the one kept tool still passes and a profile
@@ -71,14 +71,19 @@ impl Snapshot {
 pub async fn run(
 	agent: &Agent,
 	environment: &Environment,
+	profile: Profile,
 	log: &mut mpsc::UnboundedReceiver<String>,
 ) -> Result<Snapshot> {
 	while log.try_recv().is_ok() {}
-	let session_id = agent.new_session(&environment.workspace, "startup check").await?;
+	let session_id = agent.new_session(&environment.workspace, profile, "startup check").await?;
 	let snapshot = tokio::time::timeout(SNAPSHOT_TIMEOUT, async {
 		while let Some(line) = log.recv().await {
 			if line.contains("Failed to parse agent definition") {
 				return Err(anyhow::anyhow!("the agent profile did not parse: {line}"));
+			}
+			// An allowlist naming a tool the CLI does not know falls back to every tool.
+			if line.contains("keeping full grok toolset") {
+				return Err(anyhow::anyhow!("the agent profile named an unknown tool: {line}"));
 			}
 			if let Some(snapshot) = Snapshot::parse(&line) {
 				return Ok(snapshot);
@@ -94,7 +99,7 @@ pub async fn run(
 	};
 	let leaks = snapshot.leaks();
 	if !leaks.is_empty() {
-		bail!("the clean environment leaked: {}", leaks.join("; "));
+		bail!("the clean environment leaked for {}: {}", profile.name(), leaks.join("; "));
 	}
 	Ok(snapshot)
 }

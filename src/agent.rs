@@ -168,9 +168,14 @@ impl Agent {
 		self.subscribers.lock().unwrap().remove(session_id);
 	}
 
-	/// A session in the clean workspace, on grok2api's profile, with `system` replacing the agent's
+	/// A session in the clean workspace, on one of grok2api's profiles, with `system` replacing the agent's
 	/// own system prompt outright.
-	pub async fn new_session(&self, cwd: &std::path::Path, system: &str) -> Result<String> {
+	pub async fn new_session(
+		&self,
+		cwd: &std::path::Path,
+		profile: crate::environment::Profile,
+		system: &str,
+	) -> Result<String> {
 		let result = self
 			.request(
 				"session/new",
@@ -179,7 +184,7 @@ impl Agent {
 					"mcpServers": [],
 					"_meta": {
 						"systemPromptOverride": system,
-						"agentProfile": crate::environment::PROFILE_NAME,
+						"agentProfile": profile.name(),
 					},
 				}),
 			)

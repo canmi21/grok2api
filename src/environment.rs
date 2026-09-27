@@ -6,12 +6,34 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
-/// The agent definition every session is created with; see `PROFILE`.
-pub const PROFILE_NAME: &str = "grok2api";
+/// An agent definition sessions are created with, written into GROK_HOME at every start.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Profile {
+	/// Chat: one tool, never useful, because an empty or unknown `tools` list gives the full set.
+	Chat,
+	/// X: the full set less everything but xAI's server-side `x_search` (spec/twitter.md).
+	Twitter,
+}
 
-/// Names one tool rather than none: an empty or unknown `tools` list gives the full tool set,
-/// and so does a definition that fails to parse. The startup check is what proves this applied.
-const PROFILE: &str = "---
+impl Profile {
+	pub const ALL: [Self; 2] = [Self::Chat, Self::Twitter];
+
+	pub fn name(self) -> &'static str {
+		match self {
+			Self::Chat => "grok2api",
+			Self::Twitter => "grok2api-twitter",
+		}
+	}
+
+	fn definition(self) -> &'static str {
+		match self {
+			Self::Chat => CHAT_PROFILE,
+			Self::Twitter => TWITTER_PROFILE,
+		}
+	}
+}
+
+const CHAT_PROFILE: &str = "---
 name: grok2api
 description: Plain chat for grok2api. No tools.
 tools: search_tool
@@ -19,6 +41,22 @@ agents_md: false
 ---
 
 You are a helpful assistant.
+";
+
+/// `x_search` cannot be allowed by name -- an allowlist does not recognize it and falls back to
+/// every tool -- so everything else is denied instead. The key is camel case; `disallowed_tools` is
+/// ignored. The shell is `run_terminal_cmd` to the denylist, whatever the tool list calls it. Only
+/// tools the clean environment has are named, since each name that matches nothing is a warning on
+/// every session. A tool a newer CLI adds is not on this list; the startup check's bound on tool
+/// definitions is what notices it.
+const TWITTER_PROFILE: &str = "---
+name: grok2api-twitter
+description: X data for grok2api. X search only.
+disallowedTools: run_terminal_cmd,read_file,search_replace,list_dir,grep,todo_write,scheduler_create,scheduler_delete,scheduler_list,monitor,use_tool,update_goal,enter_plan_mode,exit_plan_mode,ask_user_question,web_search,web_fetch,image_gen,image_edit,image_to_video,reference_to_video,write,Agent
+agents_md: false
+---
+
+You read X with your X tools.
 ";
 
 /// Read by grok's log filter: warnings, plus the per-session context breakdown the startup
@@ -67,7 +105,9 @@ impl Environment {
 		}
 		let agents = environment.grok_home.join("agents");
 		std::fs::create_dir_all(&agents)?;
-		std::fs::write(agents.join(format!("{PROFILE_NAME}.md")), PROFILE)?;
+		for profile in Profile::ALL {
+			std::fs::write(agents.join(format!("{}.md", profile.name())), profile.definition())?;
+		}
 		Ok(environment)
 	}
 

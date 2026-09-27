@@ -85,7 +85,8 @@ pub fn run() {
 			Some("session/new") => {
 				next_session += 1;
 				let session = format!("fake-{next_session}");
-				let profiled = params["_meta"]["agentProfile"].as_str() == Some("grok2api");
+				let profiled =
+					params["_meta"]["agentProfile"].as_str().is_some_and(|name| name.starts_with("grok2api"));
 				let tools = if profiled { 698 } else { 8831 };
 				eprintln!(
 					"INFO session.context_snapshot: session_context_snapshot: emitted model=\"fake-1\" skills_tokens=0 system_prompt_tokens=2 tool_definitions_tokens={tools} mcp_tokens=0 agents_md_tokens=0 workflows_tokens=0 skills_count=0"

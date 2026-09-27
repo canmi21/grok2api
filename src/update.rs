@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::agent::Agent;
 use crate::check;
 use crate::cli::{self, Binaries};
-use crate::environment::Environment;
+use crate::environment::{Environment, Profile};
 use crate::turn::Bridge;
 
 /// How often a signed-out start looks again, waiting for `grok2api login`.
@@ -36,8 +36,10 @@ pub async fn launch(environment: &Environment, binary: &Path) -> Result<Arc<Agen
 	if !agent.info.signed_in {
 		return Err(SignedOut.into());
 	}
-	let snapshot = check::run(&agent, environment, &mut log).await?;
-	tracing::info!(version = %agent.info.version, ?snapshot, "clean environment verified");
+	for profile in Profile::ALL {
+		let snapshot = check::run(&agent, environment, profile, &mut log).await?;
+		tracing::info!(version = %agent.info.version, profile = profile.name(), ?snapshot, "clean environment verified");
+	}
 	// The check needed the log; nothing reads it from here on.
 	tokio::spawn(async move { while log.recv().await.is_some() {} });
 	Ok(agent)
