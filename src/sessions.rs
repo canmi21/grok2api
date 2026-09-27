@@ -5,8 +5,11 @@ use std::time::{Duration, Instant};
 
 use crate::message::MessageKey;
 
-/// A session not answering anything right now, with the conversation it has seen.
-pub struct Session {
+/// A session not answering anything right now, with the conversation it has seen. `A` is the
+/// agent it lives in: a session stays with the agent that made it, including one a newer CLI has
+/// since replaced (spec/deployment.md), and holding it is what keeps that agent alive.
+pub struct Session<A> {
+	pub agent: A,
 	pub id: String,
 	pub system: String,
 	pub history: Vec<MessageKey>,
@@ -15,27 +18,27 @@ pub struct Session {
 	last_used: Instant,
 }
 
-impl Session {
-	pub fn new(id: String, system: String, model: String, effort: Option<String>) -> Self {
-		Self { id, system, history: Vec::new(), model, effort, last_used: Instant::now() }
+impl<A> Session<A> {
+	pub fn new(agent: A, id: String, system: String, model: String) -> Self {
+		Self { agent, id, system, history: Vec::new(), model, effort: None, last_used: Instant::now() }
 	}
 }
 
 /// A session is either here, idle, or held by the one request it is answering. Taking it out to
 /// answer is what keeps two requests from continuing one conversation at once: the second finds
 /// nothing to match and starts a session of its own.
-pub struct Pool {
-	idle: Mutex<Vec<Session>>,
+pub struct Pool<A> {
+	idle: Mutex<Vec<Session<A>>>,
 	idle_for: Duration,
 }
 
-impl Pool {
+impl<A> Pool<A> {
 	pub fn new(idle_for: Duration) -> Self {
-		Self { idle: Mutex::default(), idle_for }
+		Self { idle: Mutex::new(Vec::new()), idle_for }
 	}
 
 	/// Takes the idle session whose conversation is exactly the one given, if there is one.
-	pub fn claim(&self, system: &str, history: &[MessageKey]) -> Option<Session> {
+	pub fn claim(&self, system: &str, history: &[MessageKey]) -> Option<Session<A>> {
 		let mut idle = self.idle.lock().unwrap();
 		let index =
 			idle.iter().position(|session| session.system == system && session.history == history)?;
@@ -43,22 +46,17 @@ impl Pool {
 	}
 
 	/// Returns a session that answered, to be continued by whichever request extends it next.
-	pub fn release(&self, mut session: Session) {
+	pub fn release(&self, mut session: Session<A>) {
 		session.last_used = Instant::now();
 		self.idle.lock().unwrap().push(session);
 	}
 
-	/// Removes the sessions idle past the limit and returns their ids, to be closed.
-	pub fn take_expired(&self) -> Vec<String> {
+	/// Removes the sessions idle past the limit, to be closed.
+	pub fn take_expired(&self) -> Vec<Session<A>> {
 		let mut idle = self.idle.lock().unwrap();
-		let mut expired = Vec::new();
-		idle.retain(|session| {
-			let keep = session.last_used.elapsed() < self.idle_for;
-			if !keep {
-				expired.push(session.id.clone());
-			}
-			keep
-		});
+		let (expired, kept) =
+			idle.drain(..).partition(|session| session.last_used.elapsed() >= self.idle_for);
+		*idle = kept;
 		expired
 	}
 }
@@ -68,8 +66,8 @@ mod tests {
 	use super::*;
 	use crate::message::Message;
 
-	fn session(id: &str, history: &[&str]) -> Session {
-		let mut session = Session::new(id.into(), String::new(), "grok-4.7".into(), None);
+	fn session(id: &str, history: &[&str]) -> Session<()> {
+		let mut session = Session::new((), id.into(), String::new(), "grok-4.7".into());
 		session.history = history.iter().map(|text| Message::assistant((*text).into()).key()).collect();
 		session
 	}
@@ -96,6 +94,8 @@ mod tests {
 	fn expires_what_idled_too_long() {
 		let pool = Pool::new(Duration::ZERO);
 		pool.release(session("a", &[]));
-		assert_eq!(pool.take_expired(), ["a"]);
+		let expired = pool.take_expired();
+		assert_eq!(expired.len(), 1);
+		assert_eq!(expired[0].id, "a");
 	}
 }

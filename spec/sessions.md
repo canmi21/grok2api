@@ -36,3 +36,9 @@ one seeded from its history, below, so expiry costs cache and never correctness.
 A request that matches no session and carries earlier turns has a history the new session never
 saw. It is sent as one prompt that renders the earlier turns ahead of the last message, which is
 the flattening above, used only where there is nothing to continue.
+
+The rendering says what the block is -- the conversation so far, not to be answered again -- marks
+each turn with whose it was, and ends by pointing at the message that follows. Turns are wrapped
+in tags rather than prefixed `User:` and `Assistant:`, because a turn's own text can contain a line
+that starts that way, and a prefix could not tell it from a boundary. An image in an earlier turn
+cannot be sent again this way, so it is named where it stood.

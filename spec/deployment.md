@@ -60,3 +60,14 @@ The CLI's state, credentials included, lives in the container's `GROK_HOME` on a
 volume. Signing in is done once, by the CLI, with its device-code flow (`grok login --device-auth`),
 which needs no browser on the server. From then on the CLI refreshes its own credentials, which is
 the division of labor [bridge.md](bridge.md) requires.
+
+**`grok2api login` is how, and a signed-out server waits for it.** The subcommand runs the CLI's
+device-code sign-in against exactly the environment the server uses -- its `HOME`, its
+`GROK_HOME`, its binary -- so nobody has to reproduce those by hand inside a container. A server
+that starts signed out does not exit: it says so and looks again every few seconds, so signing in
+is `grok2api login` in the running container and nothing more. Exiting instead would put the
+container in a restart loop that has to be caught between restarts to be signed in at all.
+
+**A development machine runs its own CLI, and nothing updates it.** Naming a binary
+(`GROK2API_GROK_BIN`) turns the managed cycle off: that binary belongs to whatever installed it,
+Homebrew on the machine this is written on, and a second updater on it would fight the first.

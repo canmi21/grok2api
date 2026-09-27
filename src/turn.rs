@@ -1,15 +1,15 @@
 //! One chat completion: find or make the session, send the prompt, stream what comes back.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::agent::{Agent, AgentInfo};
+use crate::agent::Agent;
 use crate::environment::Environment;
 use crate::message::{Conversation, Message};
-use crate::sessions::{Pool, Session};
+use crate::sessions;
 use crate::transcript::render_history;
 
 /// Put ahead of the client's own system prompt. The model reaches for any tool it has, and the
@@ -17,11 +17,14 @@ use crate::transcript::render_history;
 const BASE_SYSTEM: &str = "You are a helpful assistant. You have no tools: answer directly, and never \
 	call, search for or mention a tool.";
 
+type Session = sessions::Session<Arc<Agent>>;
+
 /// Everything a completion needs, shared by every request.
 pub struct Bridge {
-	pub agent: Arc<Agent>,
-	pub info: AgentInfo,
-	pub pool: Pool,
+	/// The agent new sessions are made in. Replaced when a newer CLI passes its check; the one it
+	/// replaces lives on in the sessions it holds (spec/deployment.md).
+	current: RwLock<Arc<Agent>>,
+	pool: sessions::Pool<Arc<Agent>>,
 	pub environment: Environment,
 }
 
@@ -40,6 +43,19 @@ pub enum Update {
 }
 
 impl Bridge {
+	pub fn new(agent: Arc<Agent>, environment: Environment, idle_for: std::time::Duration) -> Self {
+		Self { current: RwLock::new(agent), pool: sessions::Pool::new(idle_for), environment }
+	}
+
+	pub fn agent(&self) -> Arc<Agent> {
+		self.current.read().unwrap().clone()
+	}
+
+	/// Makes `agent` the one new sessions go to.
+	pub fn replace(&self, agent: Arc<Agent>) {
+		*self.current.write().unwrap() = agent;
+	}
+
 	/// Prepares the session and starts the prompt. An error here is the request's, returned before
 	/// any byte of the response; a failure after it arrives as `Update::Failed`.
 	pub async fn start(self: &Arc<Self>, request: Request) -> Result<mpsc::Receiver<Update>> {
@@ -49,12 +65,12 @@ impl Bridge {
 		{
 			Some(session) => (session, Vec::new(), true),
 			None => {
-				let id = self
-					.agent
+				let agent = self.agent();
+				let id = agent
 					.new_session(&self.environment.workspace, &system_prompt(&conversation.system))
 					.await?;
-				let mut session =
-					Session::new(id, conversation.system.clone(), self.info.default_model.clone(), None);
+				let model = agent.info.default_model.clone();
+				let mut session = Session::new(agent, id, conversation.system.clone(), model);
 				session.history = history;
 				let seed = render_history(&conversation.history);
 				let blocks =
@@ -88,13 +104,13 @@ impl Bridge {
 		effort: Option<&str>,
 	) -> Result<()> {
 		if session.model != model {
-			self.agent.set_option(&session.id, "model", model).await?;
+			session.agent.set_option(&session.id, "model", model).await?;
 			session.model = model.to_owned();
 		}
 		if let Some(effort) = effort
 			&& session.effort.as_deref() != Some(effort)
 		{
-			match self.agent.set_option(&session.id, "reasoning_effort", effort).await {
+			match session.agent.set_option(&session.id, "reasoning_effort", effort).await {
 				Ok(()) => session.effort = Some(effort.to_owned()),
 				Err(error) => {
 					tracing::debug!(%error, effort, "ignored a reasoning effort the model does not offer")
@@ -111,9 +127,9 @@ impl Bridge {
 		blocks: Vec<Value>,
 		tx: mpsc::Sender<Update>,
 	) {
-		let id = session.id.clone();
-		let mut updates = self.agent.subscribe(&id);
-		let prompt = self.agent.prompt(&id, blocks);
+		let (agent, id) = (session.agent.clone(), session.id.clone());
+		let mut updates = agent.subscribe(&id);
+		let prompt = agent.prompt(&id, blocks);
 		tokio::pin!(prompt);
 		let mut content = String::new();
 		let mut client_gone = false;
@@ -124,7 +140,7 @@ impl Bridge {
 					if !forward(&update, &mut content, &tx).await && !client_gone {
 						client_gone = true;
 						tracing::info!(session = %id, "the client went away; cancelling");
-						self.agent.cancel(&id);
+						agent.cancel(&id);
 					}
 				}
 			}
@@ -133,7 +149,7 @@ impl Bridge {
 		while let Ok(update) = updates.try_recv() {
 			forward(&update, &mut content, &tx).await;
 		}
-		self.agent.unsubscribe(&id);
+		agent.unsubscribe(&id);
 
 		match result {
 			Ok(result) if !client_gone => {
@@ -160,14 +176,14 @@ impl Bridge {
 	}
 
 	fn discard(&self, session: Session) {
-		let agent = self.agent.clone();
-		tokio::spawn(async move { agent.close(&session.id).await });
+		tokio::spawn(async move { session.agent.close(&session.id).await });
 	}
 
-	/// Closes the sessions idle past the limit; run on a timer.
+	/// Closes the sessions idle past the limit; run on a timer. A replaced agent goes when the
+	/// last of its sessions does.
 	pub async fn expire(&self) {
-		for id in self.pool.take_expired() {
-			self.agent.close(&id).await;
+		for session in self.pool.take_expired() {
+			session.agent.close(&session.id).await;
 		}
 	}
 }

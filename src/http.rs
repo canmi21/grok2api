@@ -88,6 +88,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 async fn models(State(state): State<AppState>) -> Json<Value> {
 	let data: Vec<Value> = state
 		.bridge
+		.agent()
 		.info
 		.models
 		.iter()
@@ -107,7 +108,8 @@ async fn chat_completions(
 	let messages =
 		body["messages"].as_array().ok_or_else(|| ApiError::invalid("messages is required"))?;
 	let conversation = message::parse(messages).map_err(ApiError::invalid)?;
-	let info = &state.bridge.info;
+	let agent = state.bridge.agent();
+	let info = &agent.info;
 	let model = body["model"]
 		.as_str()
 		.filter(|model| !model.is_empty())

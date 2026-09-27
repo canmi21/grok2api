@@ -2,8 +2,9 @@
 //! line. See spec/bridge.md, "One resident agent, spoken to over ACP".
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -42,28 +43,39 @@ pub struct AgentInfo {
 }
 
 pub struct Agent {
+	pub info: AgentInfo,
 	writer: mpsc::UnboundedSender<String>,
 	pending: Pending,
 	subscribers: Subscribers,
 	next_id: AtomicU64,
+	/// Set once nothing holds the agent any more; its exit is then expected rather than fatal.
+	retired: Arc<AtomicBool>,
 	_child: Child,
 }
 
+/// An agent is dropped when it is replaced and its last session is gone, or when it failed the
+/// check it was started for. Its child is killed with it, and that exit is not the server's.
+impl Drop for Agent {
+	fn drop(&mut self) {
+		self.retired.store(true, Ordering::SeqCst);
+	}
+}
+
 impl Agent {
-	/// Starts the agent. The returned receiver carries its stderr lines, which is where the
-	/// startup check reads the context breakdown from.
-	pub fn spawn(
+	/// Starts an agent on `binary` and initializes it. The returned receiver carries its stderr
+	/// lines, which is where the startup check reads the context breakdown from.
+	pub async fn start(
 		environment: &Environment,
-		grok_bin: &std::path::Path,
+		binary: &Path,
 	) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<String>)> {
 		let mut child = environment
-			.agent_command(grok_bin)
+			.agent_command(binary)
 			.stdin(Stdio::piped())
 			.stdout(Stdio::piped())
 			.stderr(Stdio::piped())
 			.kill_on_drop(true)
 			.spawn()
-			.with_context(|| format!("cannot start {}", grok_bin.display()))?;
+			.with_context(|| format!("cannot start {}", binary.display()))?;
 		let stdin = child.stdin.take().context("agent has no stdin")?;
 		let stdout = child.stdout.take().context("agent has no stdout")?;
 		let stderr = child.stderr.take().context("agent has no stderr")?;
@@ -80,25 +92,47 @@ impl Agent {
 
 		let pending: Pending = Arc::default();
 		let subscribers: Subscribers = Arc::default();
-		tokio::spawn(read_stdout(stdout, writer.clone(), pending.clone(), subscribers.clone()));
+		let retired = Arc::new(AtomicBool::new(false));
+		tokio::spawn(read_stdout(
+			stdout,
+			writer.clone(),
+			pending.clone(),
+			subscribers.clone(),
+			retired.clone(),
+		));
 		let (log_tx, log_rx) = mpsc::unbounded_channel();
 		tokio::spawn(read_stderr(stderr, log_tx));
 
-		let agent =
-			Arc::new(Self { writer, pending, subscribers, next_id: AtomicU64::new(1), _child: child });
+		let info = match tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&writer, &pending)).await {
+			Ok(Ok(info)) => info,
+			// No Agent exists yet to be dropped, so the flag is set by hand before the child goes.
+			Ok(Err(error)) => {
+				retired.store(true, Ordering::SeqCst);
+				return Err(error);
+			}
+			Err(_) => {
+				retired.store(true, Ordering::SeqCst);
+				anyhow::bail!(
+					"{} did not answer initialize within {INITIALIZE_TIMEOUT:?}",
+					binary.display()
+				);
+			}
+		};
+		let agent = Arc::new(Self {
+			info,
+			writer,
+			pending,
+			subscribers,
+			next_id: AtomicU64::new(INITIALIZE_ID + 1),
+			retired,
+			_child: child,
+		});
 		Ok((agent, log_rx))
 	}
 
 	pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
 		let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-		let (tx, rx) = oneshot::channel();
-		self.pending.lock().unwrap().insert(id, tx);
-		self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
-		match rx.await {
-			Ok(Ok(result)) => Ok(result),
-			Ok(Err(error)) => Err(error.into()),
-			Err(_) => Err(anyhow!("the agent exited while {method} was pending")),
-		}
+		call(&self.writer, &self.pending, id, method, params).await
 	}
 
 	pub fn notify(&self, method: &str, params: Value) -> Result<()> {
@@ -119,36 +153,6 @@ impl Agent {
 
 	pub fn unsubscribe(&self, session_id: &str) {
 		self.subscribers.lock().unwrap().remove(session_id);
-	}
-
-	pub async fn initialize(&self) -> Result<AgentInfo> {
-		let result = self
-			.request(
-				"initialize",
-				json!({
-					"protocolVersion": 1,
-					"clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
-				}),
-			)
-			.await?;
-		let meta = &result["_meta"];
-		let state = &meta["modelState"];
-		let models: Vec<String> = state["availableModels"]
-			.as_array()
-			.map(|models| {
-				models.iter().filter_map(|model| model["modelId"].as_str().map(str::to_owned)).collect()
-			})
-			.unwrap_or_default();
-		Ok(AgentInfo {
-			version: meta["agentVersion"].as_str().unwrap_or("unknown").to_owned(),
-			signed_in: meta["defaultAuthMethodId"].as_str() == Some("cached_token"),
-			default_model: state["currentModelId"]
-				.as_str()
-				.map(str::to_owned)
-				.or_else(|| models.first().cloned())
-				.unwrap_or_default(),
-			models,
-		})
 	}
 
 	/// A session in the clean workspace, on grok2api's profile, with `system` replacing the agent's
@@ -196,11 +200,65 @@ impl Agent {
 	}
 }
 
+/// The id `initialize` is sent with; every later request counts up from it.
+const INITIALIZE_ID: u64 = 1;
+
+/// It answered in 0.1 s when measured; a binary that takes this long is not going to.
+const INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn call(
+	writer: &mpsc::UnboundedSender<String>,
+	pending: &Pending,
+	id: u64,
+	method: &str,
+	params: Value,
+) -> Result<Value> {
+	let (tx, rx) = oneshot::channel();
+	pending.lock().unwrap().insert(id, tx);
+	let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+	writer.send(format!("{message}\n")).map_err(|_| anyhow!("the agent's stdin is closed"))?;
+	match rx.await {
+		Ok(Ok(result)) => Ok(result),
+		Ok(Err(error)) => Err(error.into()),
+		Err(_) => Err(anyhow!("the agent exited while {method} was pending")),
+	}
+}
+
+async fn initialize(
+	writer: &mpsc::UnboundedSender<String>,
+	pending: &Pending,
+) -> Result<AgentInfo> {
+	let params = json!({
+		"protocolVersion": 1,
+		"clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+	});
+	let result = call(writer, pending, INITIALIZE_ID, "initialize", params).await?;
+	let meta = &result["_meta"];
+	let state = &meta["modelState"];
+	let models: Vec<String> = state["availableModels"]
+		.as_array()
+		.map(|models| {
+			models.iter().filter_map(|model| model["modelId"].as_str().map(str::to_owned)).collect()
+		})
+		.unwrap_or_default();
+	Ok(AgentInfo {
+		version: meta["agentVersion"].as_str().unwrap_or("unknown").to_owned(),
+		signed_in: meta["defaultAuthMethodId"].as_str() == Some("cached_token"),
+		default_model: state["currentModelId"]
+			.as_str()
+			.map(str::to_owned)
+			.or_else(|| models.first().cloned())
+			.unwrap_or_default(),
+		models,
+	})
+}
+
 async fn read_stdout(
 	stdout: ChildStdout,
 	writer: mpsc::UnboundedSender<String>,
 	pending: Pending,
 	subscribers: Subscribers,
+	retired: Arc<AtomicBool>,
 ) {
 	let mut lines = BufReader::new(stdout).lines();
 	while let Ok(Some(line)) = lines.next_line().await {
@@ -239,7 +297,12 @@ async fn read_stdout(
 		}
 	}
 	// Every pending request fails as its sender drops. A server whose agent is gone cannot answer
-	// anything, so it stops and leaves the restart to whatever runs it; spec/bridge.md.
+	// anything, so it stops and leaves the restart to whatever runs it; spec/bridge.md, "When the
+	// agent goes". An agent nothing holds any more was killed on purpose.
+	if retired.load(Ordering::SeqCst) {
+		tracing::debug!("a retired agent exited");
+		return;
+	}
 	tracing::error!("the agent exited");
 	std::process::exit(1);
 }

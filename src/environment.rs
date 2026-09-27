@@ -49,6 +49,8 @@ pub struct Environment {
 	pub grok_home: PathBuf,
 	/// The working directory sessions are created in, also empty.
 	pub workspace: PathBuf,
+	/// The CLI binaries grok2api manages (spec/deployment.md).
+	pub cli: PathBuf,
 }
 
 impl Environment {
@@ -58,6 +60,7 @@ impl Environment {
 			home: root.join("home"),
 			grok_home: root.join("grok"),
 			workspace: root.join("workspace"),
+			cli: root.join("cli"),
 		};
 		for dir in [&environment.home, &environment.grok_home, &environment.workspace] {
 			std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
@@ -70,16 +73,9 @@ impl Environment {
 
 	/// `grok agent stdio`, with the environment cleared and set to the one above.
 	pub fn agent_command(&self, grok_bin: &Path) -> Command {
-		let mut command = Command::new(grok_bin);
-		command.args(["agent", "stdio"]).current_dir(&self.workspace).env_clear();
-		for name in PASSED_THROUGH {
-			if let Ok(value) = std::env::var(name) {
-				command.env(name, value);
-			}
-		}
+		let mut command = self.command(grok_bin);
 		command
-			.env("HOME", &self.home)
-			.env("GROK_HOME", &self.grok_home)
+			.args(["agent", "stdio"])
 			.env("GROK_WORKFLOWS", "0")
 			.env("GROK_SUBAGENTS", "0")
 			.env("GROK_MEMORY", "0")
@@ -89,9 +85,24 @@ impl Environment {
 		command
 	}
 
-	/// What a person runs to sign this environment in; printed when the check finds it signed out.
-	pub fn login_hint(&self, grok_bin: &Path) -> String {
-		format!("GROK_HOME={} {} login --device-auth", self.grok_home.display(), grok_bin.display())
+	/// `grok login` by device code, which needs no browser where it runs, into this environment's
+	/// GROK_HOME. The CLI does the signing in; grok2api only starts it (spec/bridge.md).
+	pub fn login_command(&self, grok_bin: &Path) -> Command {
+		let mut command = self.command(grok_bin);
+		command.args(["login", "--device-auth"]);
+		command
+	}
+
+	fn command(&self, grok_bin: &Path) -> Command {
+		let mut command = Command::new(grok_bin);
+		command.current_dir(&self.workspace).env_clear();
+		for name in PASSED_THROUGH {
+			if let Ok(value) = std::env::var(name) {
+				command.env(name, value);
+			}
+		}
+		command.env("HOME", &self.home).env("GROK_HOME", &self.grok_home);
+		command
 	}
 }
 

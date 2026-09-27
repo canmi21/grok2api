@@ -1,5 +1,6 @@
 mod agent;
 mod check;
+mod cli;
 mod config;
 mod environment;
 mod http;
@@ -7,43 +8,62 @@ mod message;
 mod sessions;
 mod transcript;
 mod turn;
+mod update;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use tracing_subscriber::EnvFilter;
 
-use crate::agent::Agent;
-use crate::config::Config;
+use crate::cli::Binaries;
+use crate::config::{Cli, Config};
 use crate::environment::Environment;
-use crate::sessions::Pool;
 use crate::turn::Bridge;
+use crate::update::Updater;
 
 /// How often idle sessions are looked at for expiry.
 const EXPIRY_SWEEP: Duration = Duration::from_secs(60);
+
+const USAGE: &str = "usage: grok2api [login]
+
+  (no argument)  serve the API
+  login          sign the CLI in, by device code, into GROK2API_DATA_DIR";
 
 #[tokio::main]
 async fn main() -> Result<()> {
 	tracing_subscriber::fmt()
 		.with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
 		.init();
+	match std::env::args().nth(1).as_deref() {
+		None | Some("serve") => serve().await,
+		Some("login") => login().await,
+		Some(_) => {
+			eprintln!("{USAGE}");
+			std::process::exit(2);
+		}
+	}
+}
 
+async fn serve() -> Result<()> {
 	let config = Config::from_env()?;
 	let environment = Environment::prepare(&config.data_dir)?;
-	let (agent, mut log) = Agent::spawn(&environment, &config.grok_bin)?;
-	let info = agent.initialize().await.context("the agent did not initialize")?;
-	tracing::info!(version = %info.version, models = ?info.models, "agent started");
-	if !info.signed_in {
-		bail!("the agent is not signed in; run `{}` once", environment.login_hint(&config.grok_bin));
-	}
-	let snapshot =
-		check::run(&agent, &environment, &mut log).await.context("the startup check failed")?;
-	tracing::info!(?snapshot, "clean environment verified");
-	// The check needed the log; nothing reads it from here on, and a full channel would grow.
-	tokio::spawn(async move { while log.recv().await.is_some() {} });
+	let (binary, updater) = match config.cli {
+		Cli::Fixed(binary) => (binary, None),
+		Cli::Managed { seed, channel, pin, interval } => {
+			let binaries = Binaries::new(environment.cli.clone())?;
+			let version = binaries.initial(&seed).await?;
+			binaries.prune(&[&version]);
+			(binaries.path(&version), Some((binaries, channel, pin, interval)))
+		}
+	};
+	let agent = update::launch_when_signed_in(&environment, &binary)
+		.await
+		.context("the agent is not fit to serve")?;
+	tracing::info!(version = %agent.info.version, models = ?agent.info.models, "agent ready");
 
-	let bridge = Arc::new(Bridge { agent, info, pool: Pool::new(config.session_idle), environment });
+	let bridge = Arc::new(Bridge::new(agent, environment, config.session_idle));
 	let sweeper = bridge.clone();
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(EXPIRY_SWEEP);
@@ -52,11 +72,35 @@ async fn main() -> Result<()> {
 			sweeper.expire().await;
 		}
 	});
+	if let Some((binaries, channel, pin, interval)) = updater {
+		tracing::info!(channel, pin = ?pin, "the CLI is updated by grok2api");
+		tokio::spawn(Updater { bridge: bridge.clone(), binaries, channel, pin, interval }.run());
+	}
 
 	let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port))
 		.await
 		.with_context(|| format!("cannot listen on port {}", config.port))?;
 	tracing::info!(port = config.port, "listening on every interface");
 	axum::serve(listener, http::router(bridge, config.api_key)).await?;
+	Ok(())
+}
+
+/// Runs the CLI's own device-code sign-in against the environment the server uses.
+async fn login() -> Result<()> {
+	let (data_dir, cli) = Config::for_login()?;
+	let environment = Environment::prepare(&data_dir)?;
+	let binary: PathBuf = match cli {
+		Cli::Fixed(binary) => binary,
+		Cli::Managed { seed, .. } => {
+			let binaries = Binaries::new(environment.cli.clone())?;
+			let version = binaries.initial(&seed).await?;
+			binaries.path(&version)
+		}
+	};
+	let status = environment.login_command(&binary).status().await?;
+	if !status.success() {
+		bail!("grok login exited with {status}");
+	}
+	println!("Signed in. A server waiting for sign-in picks it up within a few seconds.");
 	Ok(())
 }
