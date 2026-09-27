@@ -1,0 +1,19 @@
+# Cargo walks up the filesystem and would otherwise treat this crate as a member of the
+# workspace this directory sits in. An empty table stops that walk.
+[workspace]
+
+[package]
+name = "grok2api"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/canmi21/grok2api"
+description = "An OpenAI-compatible API served from the Grok Build CLI's subscription."
+
+[dependencies]
+
+# clippy carries no style lints; rustfmt owns layout. See the workspace's spec/lint-format.md.
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"
+complexity = "warn"
