@@ -24,6 +24,13 @@ A conversation the client edited -- a changed earlier message, a regenerated rep
 system prompt -- no longer extends any session, and so starts a new one. That is correct rather
 than a miss: the session's history is no longer the client's.
 
+## A session lives for a day of idleness
+
+A session is kept for 24 hours after it last answered, then closed and forgotten; the period is a
+setting. A day covers a conversation left overnight and picked up the next morning, which is the
+usual way a chat is resumed. A request that would have continued a closed session starts a new
+one seeded from its history, below, so expiry costs cache and never correctness.
+
 ## A new session is seeded from the history
 
 A request that matches no session and carries earlier turns has a history the new session never

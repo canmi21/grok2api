@@ -24,7 +24,26 @@ it ignores it.
 
 The agent executes its own tools; it has no way to hand a tool call back to the caller and wait
 for the result. Emulating that through prompting and parsing was judged too fragile to start
-with, so the `tools` and `tool_choice` parameters are not supported.
+with, so the `tools` and `tool_choice` parameters are not supported -- and, like every parameter
+the next section covers, they are ignored rather than refused.
+
+## What cannot be honored is ignored, except `n`
+
+The agent exposes no temperature, `top_p`, output limit, stop sequences, penalties or seed, and
+no tools of the caller's. A request carrying any of them is answered as if it did not: the
+parameters are dropped without an error. Clients send most of these by default, and refusing
+them would refuse most clients for settings that rarely change an answer's use.
+
+`n` greater than 1 is the exception and is refused with a 400. It asks for a different response
+shape -- several choices -- and answering with one would be a wrong answer rather than an
+approximate one.
+
+## Images arrive as data URLs, and only so
+
+An `image_url` content part whose URL is a `data:` URL is decoded and sent to the agent as an
+`image` block, which the model sees ([bridge.md](bridge.md), "Images reach the model"). A part
+whose URL is anything else is refused. grok2api does not fetch URLs on a caller's behalf: that
+would make it an open fetcher sitting on a server, reaching whatever address a request names.
 
 ## Every interface, one port, one key
 
