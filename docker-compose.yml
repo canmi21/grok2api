@@ -5,7 +5,7 @@ services:
     image: grok2api
     restart: unless-stopped
     ports:
-      - "${GROK2API_PORT:-8000}:8000"
+      - "${GROK2API_PORT:-42042}:42042"
     environment:
       GROK2API_API_KEY: ${GROK2API_API_KEY:?set GROK2API_API_KEY in .env}
       # Hold the CLI at one version instead of following the stable channel.

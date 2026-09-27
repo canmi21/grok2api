@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+/// 42 twice: Grok is modeled on The Hitchhiker's Guide to the Galaxy, where 42 is the answer.
+const DEFAULT_PORT: u16 = 42042;
+
 pub struct Config {
 	/// The port listened on, on every interface (spec/api.md).
 	pub port: u16,
@@ -37,7 +40,7 @@ pub enum Cli {
 impl Config {
 	pub fn from_env() -> Result<Self> {
 		Ok(Self {
-			port: parse("GROK2API_PORT", 8000)?,
+			port: parse("GROK2API_PORT", DEFAULT_PORT)?,
 			api_key: api_key()?,
 			data_dir: var("GROK2API_DATA_DIR").unwrap_or_else(|| "data".into()).into(),
 			cli: Cli::from_env()?,

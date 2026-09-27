@@ -45,7 +45,7 @@ COPY --from=seed /grok /usr/local/lib/grok2api/grok
 COPY --from=build /src/target/release/grok2api /usr/local/bin/grok2api
 USER grok2api
 ENV GROK2API_DATA_DIR=/data \
-	GROK2API_PORT=8000
+	GROK2API_PORT=42042
 VOLUME /data
-EXPOSE 8000
+EXPOSE 42042
 ENTRYPOINT ["grok2api"]
