@@ -11,6 +11,7 @@ mod responses;
 mod sessions;
 mod transcript;
 mod turn;
+mod twitter;
 mod update;
 
 use std::io::IsTerminal;
@@ -70,12 +71,14 @@ async fn serve() -> Result<()> {
 	tracing::info!(version = %agent.info.version, models = ?agent.info.models, "agent ready");
 
 	let bridge = Arc::new(Bridge::new(agent, environment, config.session_idle));
-	let sweeper = bridge.clone();
+	let twitter = Arc::new(twitter::Service::new(bridge.clone(), &config.twitter));
+	let (sessions, latest) = (bridge.clone(), twitter.clone());
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(EXPIRY_SWEEP);
 		loop {
 			interval.tick().await;
-			sweeper.expire().await;
+			sessions.expire().await;
+			latest.sweep();
 		}
 	});
 	if let Some((binaries, channel, pin, interval)) = updater {
@@ -87,7 +90,7 @@ async fn serve() -> Result<()> {
 		.await
 		.with_context(|| format!("cannot listen on port {}", config.port))?;
 	tracing::info!(port = config.port, "listening on every interface");
-	axum::serve(listener, http::router(bridge, config.api_key)).await?;
+	axum::serve(listener, http::router(bridge, twitter, config.api_key)).await?;
 	Ok(())
 }
 

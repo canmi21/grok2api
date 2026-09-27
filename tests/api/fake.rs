@@ -29,6 +29,8 @@ struct State {
 	cancelled: HashSet<String>,
 	cancels: u64,
 	closes: u64,
+	/// Prompts that asked for X data.
+	fetches: u64,
 	/// Replies the client owes to requests this agent sent, by id.
 	waiting: HashMap<u64, Sender<Value>>,
 }
@@ -151,10 +153,16 @@ fn prompt(state: &Shared, out: &Out, id: Value, params: &Value) {
 		);
 	};
 
+	if let Some(properties) = params["_meta"]["outputSchema"]["properties"].as_object()
+		&& ["found", "posts", "users"].iter().any(|key| properties.contains_key(*key))
+	{
+		state.lock().unwrap().fetches += 1;
+		return x_answer(state, out, &session, &said, properties, done);
+	}
 	if said.contains("STATS") {
 		let text = {
 			let state = state.lock().unwrap();
-			format!("cancels={} closes={}", state.cancels, state.closes)
+			format!("cancels={} closes={} fetches={}", state.cancels, state.closes, state.fetches)
 		};
 		update(out, &session, chunk("agent_message_chunk", &text));
 		return done("end_turn");
@@ -200,5 +208,105 @@ fn prompt(state: &Shared, out: &Out, id: Value, params: &Value) {
 	let (head, tail) = text.split_at(middle);
 	update(out, &session, chunk("agent_message_chunk", head));
 	update(out, &session, chunk("agent_message_chunk", tail));
+	done("end_turn");
+}
+
+/// The tool arguments a grok2api X prompt carries: the JSON after "arguments: ".
+fn arguments(said: &str) -> Value {
+	let start = said.find("arguments: ").map(|at| at + "arguments: ".len()).unwrap();
+	let mut stream = serde_json::Deserializer::from_str(&said[start..]).into_iter::<Value>();
+	stream.next().unwrap().unwrap()
+}
+
+/// A post as the model would write it. Ids ending in 7 were posted just now, the rest in 2025; ids
+/// ending in 4 quote the post before them.
+fn fake_post(id: u128) -> Value {
+	let created_at = if id % 10 == 7 { utc_now() } else { "2025-09-25T14:34:15Z".to_owned() };
+	json!({
+		"id": id.to_string(),
+		"text": format!("post {id}"),
+		"created_at": created_at,
+		"conversation_id": id.to_string(),
+		"author": { "username": "fake_user", "name": "Fake", "avatar_url": "https://pbs.twimg.com/profile_images/1/a.jpg" },
+		"metrics": { "likes": 1, "reposts": 0, "quotes": 0, "replies": 0, "bookmarks": 0, "views": 10 },
+		"media": [{ "type": "photo", "url": "https://pbs.twimg.com/media/fake.jpg" }],
+		"quoted": if id % 10 == 4 { fake_quoted(id - 1) } else { Value::Null },
+	})
+}
+
+fn fake_quoted(id: u128) -> Value {
+	let mut post = fake_post(id);
+	post.as_object_mut().unwrap().remove("quoted");
+	post
+}
+
+fn utc_now() -> String {
+	let output =
+		std::process::Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).output().unwrap();
+	String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn x_answer(
+	state: &Shared,
+	out: &Out,
+	session: &str,
+	said: &str,
+	properties: &serde_json::Map<String, Value>,
+	done: impl Fn(&str),
+) {
+	let arguments = arguments(said);
+	let answer = if properties.contains_key("posts") {
+		let query = arguments["query"].as_str().unwrap_or_default();
+		let limit = arguments["limit"].as_u64().unwrap_or(3) as u128;
+		let top = query
+			.split(' ')
+			.find_map(|term| term.strip_prefix("max_id:"))
+			.map(|max| max.parse::<u128>().unwrap())
+			.unwrap_or(1000);
+		let count = if query.contains("SHORT") { limit.min(3) } else { limit };
+		let mut posts: Vec<Value> = (0..count).map(|offset| fake_post(top - offset)).collect();
+		if query.contains("DIRTY") {
+			posts[0]["id"] = "not-an-id".into();
+		}
+		if arguments.get("usernames").is_some() {
+			posts[0]["text"] = format!("args={arguments}").into();
+		}
+		json!({ "posts": posts })
+	} else if properties.contains_key("users") {
+		let count = arguments["count"].as_u64().unwrap_or(3);
+		let users: Vec<Value> = (0..count)
+			.map(|index| json!({ "id": format!("{}", 100 + index), "username": format!("user{index}"), "name": "User", "avatar_url": null, "bio": "bio", "followers": 5, "verified": null }))
+			.collect();
+		json!({ "users": users })
+	} else if properties.contains_key("user") {
+		let name = arguments["query"].as_str().unwrap();
+		if name == "nobody" {
+			json!({ "found": false, "user": null })
+		} else {
+			json!({ "found": true, "user": { "id": "42", "username": name.to_uppercase(), "name": "Found", "avatar_url": null, "bio": null, "followers": 7, "verified": "Blue Verified" } })
+		}
+	} else {
+		let id: u128 = arguments["post_id"].as_str().unwrap().parse().unwrap();
+		if id == 404 {
+			json!({ "found": false, "post": null, "parents": [], "replies": [] })
+		} else if properties.contains_key("parents") {
+			json!({ "found": true, "post": fake_post(id), "parents": [fake_post(id - 1)], "replies": [fake_post(id + 1), fake_post(id + 2)] })
+		} else {
+			json!({ "found": true, "post": fake_post(id) })
+		}
+	};
+	let text = answer.to_string();
+	if said.contains("SLOWLIST") {
+		// Written a few characters at a time, so a short budget ends it partway.
+		for piece in text.as_bytes().chunks(40) {
+			if state.lock().unwrap().cancelled.remove(session) {
+				return done("cancelled");
+			}
+			update(out, session, chunk("agent_message_chunk", std::str::from_utf8(piece).unwrap()));
+			std::thread::sleep(Duration::from_millis(60));
+		}
+	} else {
+		update(out, session, chunk("agent_message_chunk", &text));
+	}
 	done("end_turn");
 }

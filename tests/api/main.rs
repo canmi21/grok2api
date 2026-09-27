@@ -4,6 +4,7 @@
 //! started by `cargo test` it runs grok2api with `GROK2API_GROK_BIN` pointing back at itself.
 
 mod fake;
+mod twitter;
 
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
@@ -23,7 +24,7 @@ fn main() {
 	}
 }
 
-struct Server {
+pub struct Server {
 	child: Child,
 	base: String,
 	client: reqwest::Client,
@@ -44,7 +45,7 @@ impl Drop for TempDir {
 	}
 }
 
-async fn start() -> Server {
+async fn start(settings: &[(&str, &str)]) -> Server {
 	let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
 	let data = std::env::temp_dir().join(format!("grok2api-test-{}-{port}", std::process::id()));
 	let child = Command::new(env!("CARGO_BIN_EXE_grok2api"))
@@ -53,6 +54,7 @@ async fn start() -> Server {
 		.env("GROK2API_DATA_DIR", &data)
 		.env("GROK2API_GROK_BIN", std::env::current_exe().unwrap())
 		.env("RUST_LOG", "warn")
+		.envs(settings.iter().copied())
 		.stdout(Stdio::null())
 		.spawn()
 		.unwrap();
@@ -81,7 +83,7 @@ impl Server {
 		(response.status().as_u16(), response.text().await.unwrap())
 	}
 
-	async fn get(&self, path: &str, headers: &[(&str, &str)]) -> (u16, Value) {
+	pub async fn get(&self, path: &str, headers: &[(&str, &str)]) -> (u16, Value) {
 		let mut request = self.client.get(format!("{}{path}", self.base));
 		for (name, value) in headers {
 			request = request.header(*name, *value);
@@ -91,7 +93,7 @@ impl Server {
 	}
 
 	/// A non-streamed chat completion: status and body.
-	async fn chat(&self, body: Value) -> (u16, Value) {
+	pub async fn chat(&self, body: Value) -> (u16, Value) {
 		let (status, text) =
 			self.post("/v1/chat/completions", body, &[("authorization", BEARER)]).await;
 		(status, serde_json::from_str(&text).unwrap())
@@ -108,21 +110,21 @@ impl Server {
 	}
 }
 
-const BEARER: &str = "Bearer test-key";
+pub const BEARER: &str = "Bearer test-key";
 
-fn content(reply: &Value) -> &str {
+pub fn content(reply: &Value) -> &str {
 	reply["choices"][0]["message"]["content"].as_str().unwrap()
 }
 
 /// The `key=value` a fake answer reports.
-fn field<'a>(answer: &'a str, key: &str) -> &'a str {
+pub fn field<'a>(answer: &'a str, key: &str) -> &'a str {
 	let start = answer.find(&format!("{key}=")).unwrap_or_else(|| panic!("no {key} in {answer}"))
 		+ key.len()
 		+ 1;
 	answer[start..].split(' ').next().unwrap()
 }
 
-fn user(text: &str) -> Value {
+pub fn user(text: &str) -> Value {
 	json!({ "role": "user", "content": text })
 }
 
@@ -145,7 +147,7 @@ fn events(body: &str) -> Vec<(String, String)> {
 }
 
 async fn run_all() {
-	let server = start().await;
+	let server = start(&[]).await;
 	macro_rules! run {
 		($($case:ident),* $(,)?) => {$(
 			$case(&server).await;
@@ -170,6 +172,12 @@ async fn run_all() {
 		streams_responses_events,
 		continues_by_previous_response_id,
 	);
+	twitter::run_all(&server).await;
+	drop(server);
+	let waiting =
+		start(&[("GROK2API_TWITTER_FAST_RESPONSE", "false"), ("GROK2API_TWITTER_TIMEOUT_SECS", "2")])
+			.await;
+	twitter::run_waiting(&waiting).await;
 }
 
 async fn refuses_a_missing_key(server: &Server) {

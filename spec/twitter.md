@@ -77,8 +77,12 @@ The shapes are grok2api's own, with X API v2's field names where one exists (`id
 `created_at`, `conversation_id`, `author`), not a copy of v2: v2's pagination tokens, exact
 metrics contract and rate limits are things this cannot honor, and imitating them would be lying.
 
-**The model is the standard one.** The fast variant costs twice as much for speed that does not
-show: the time goes to the tool and to writing the answer out, not to thinking.
+**The model is the standard one, at low effort.** The fast variant costs twice as much for speed
+that does not show: the time goes to the tool and to writing the answer out, not to thinking. For
+the same reason the reasoning effort is low by default -- the model copies what a tool returned,
+which is not a problem to reason about -- and it is a setting, `GROK2API_TWITTER_EFFORT`, beside the
+budget (`GROK2API_TWITTER_TIMEOUT_SECS`, 60 by default) and fast response
+(`GROK2API_TWITTER_FAST_RESPONSE`).
 
 **A post's URL is built, not read.** `https://x.com/<username>/status/<id>` follows from two fields
 the model already copied, so it is not a third thing it could copy wrong. What the model does copy

@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::turn::{self, Bridge, Update};
-use crate::{anthropic, openai, responses};
+use crate::{anthropic, openai, responses, twitter};
 
 /// Images arrive inline, so a request can be far larger than axum's 2 MB default.
 const BODY_LIMIT: usize = 32 * 1024 * 1024;
@@ -24,17 +24,19 @@ const BODY_LIMIT: usize = 32 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AppState {
 	pub bridge: Arc<Bridge>,
+	pub twitter: Arc<twitter::Service>,
 	api_key: Arc<str>,
 }
 
-pub fn router(bridge: Arc<Bridge>, api_key: String) -> Router {
-	let state = AppState { bridge, api_key: api_key.into() };
+pub fn router(bridge: Arc<Bridge>, twitter: Arc<twitter::Service>, api_key: String) -> Router {
+	let state = AppState { bridge, twitter, api_key: api_key.into() };
 	Router::new()
 		.route("/v1/models", get(models))
 		.route("/v1/models/{id}", get(model))
 		.route("/v1/chat/completions", post(openai::chat_completions))
 		.route("/v1/messages", post(anthropic::messages))
 		.route("/v1/responses", post(responses::responses))
+		.nest("/twitter", twitter::router())
 		.layer(middleware::from_fn_with_state(state.clone(), authorize))
 		.layer(DefaultBodyLimit::max(BODY_LIMIT))
 		.with_state(state)

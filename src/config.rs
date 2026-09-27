@@ -19,6 +19,17 @@ pub struct Config {
 	pub cli: Cli,
 	/// How long a session is kept after it last answered (spec/sessions.md).
 	pub session_idle: Duration,
+	pub twitter: Twitter,
+}
+
+/// The `/twitter/` endpoints (spec/twitter.md).
+pub struct Twitter {
+	/// Answer from the latest result at once and refresh behind, or wait for a fresh one.
+	pub fast_response: bool,
+	/// The time budget of one request; what was obtained by then is returned.
+	pub budget: Duration,
+	/// The model only copies what a tool returned, which needs little reasoning.
+	pub effort: String,
 }
 
 /// Which Grok CLI runs, and who moves it.
@@ -45,6 +56,11 @@ impl Config {
 			data_dir: var("GROK2API_DATA_DIR").unwrap_or_else(|| "data".into()).into(),
 			cli: Cli::from_env()?,
 			session_idle: Duration::from_secs(parse("GROK2API_SESSION_IDLE_SECS", 24 * 60 * 60)?),
+			twitter: Twitter {
+				fast_response: parse("GROK2API_TWITTER_FAST_RESPONSE", true)?,
+				budget: Duration::from_secs(parse("GROK2API_TWITTER_TIMEOUT_SECS", 60)?),
+				effort: var("GROK2API_TWITTER_EFFORT").unwrap_or_else(|| "low".into()),
+			},
 		})
 	}
 
