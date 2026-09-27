@@ -43,6 +43,19 @@ async fn fetches(server: &Server) -> u64 {
 	field(content(&stats), "fetches").parse().unwrap()
 }
 
+/// The fetch count once no refresh is running any more.
+async fn settled_fetches(server: &Server) -> u64 {
+	let mut last = fetches(server).await;
+	loop {
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		let now = fetches(server).await;
+		if now == last {
+			return now;
+		}
+		last = now;
+	}
+}
+
 fn ids(answer: &Answer) -> Vec<u128> {
 	answer.body["data"]
 		.as_array()
@@ -105,7 +118,9 @@ async fn answers_at_once_and_refreshes_behind(server: &Server) {
 	assert_eq!(answer.body["data"]["url"], "https://x.com/fake_user/status/2104132837968580727");
 	assert_eq!(answer.cache_control, RECENT, "posted within the hour");
 
-	let before = fetches(server).await;
+	// The request that got the 200 started a refresh of its own; wait it out, or the next request
+	// joins it rather than starting one.
+	let before = settled_fetches(server).await;
 	let again = fetch(server, path).await;
 	assert_eq!(again.status, 200, "answered from what is held");
 	for _ in 0..50 {
@@ -128,7 +143,7 @@ async fn keeps_what_can_no_longer_change(server: &Server) {
 	let kept = std::fs::read_dir(server._data.0.join("twitter")).unwrap().count();
 	assert!(kept >= 1, "kept on the volume");
 
-	let before = fetches(server).await;
+	let before = settled_fetches(server).await;
 	for _ in 0..3 {
 		assert_eq!(fetch(server, path).await.cache_control, IMMUTABLE);
 	}
