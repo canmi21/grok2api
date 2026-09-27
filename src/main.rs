@@ -10,6 +10,7 @@ mod transcript;
 mod turn;
 mod update;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +36,8 @@ const USAGE: &str = "usage: grok2api [login]
 async fn main() -> Result<()> {
 	tracing_subscriber::fmt()
 		.with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+		// Color codes only where something renders them; a container's log collector does not.
+		.with_ansi(std::io::stdout().is_terminal())
 		.init();
 	match std::env::args().nth(1).as_deref() {
 		None | Some("serve") => serve().await,

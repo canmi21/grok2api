@@ -1,0 +1,18 @@
+# Sign in once, while it runs: docker compose exec grok2api grok2api login
+services:
+  grok2api:
+    build: .
+    image: grok2api
+    restart: unless-stopped
+    ports:
+      - "${GROK2API_PORT:-8000}:8000"
+    environment:
+      GROK2API_API_KEY: ${GROK2API_API_KEY:?set GROK2API_API_KEY in .env}
+      # Hold the CLI at one version instead of following the stable channel.
+      GROK2API_GROK_VERSION: ${GROK2API_GROK_VERSION:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - data:/data
+
+volumes:
+  data:

@@ -6,3 +6,6 @@
 
 # The default GROK2API_DATA_DIR: the agent's environment and the CLI's credentials.
 /data
+
+# The compose file's settings, the API key among them.
+/.env
