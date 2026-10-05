@@ -34,7 +34,7 @@ name = "api"
 path = "tests/api/main.rs"
 harness = false
 
-# clippy carries no style lints; rustfmt owns layout. See the workspace's spec/lint-format.md.
+# `style` is left at clippy's default, a warning; see the workspace's spec/lint-format.md.
 [lints.clippy]
 correctness = "deny"
 suspicious = "deny"
